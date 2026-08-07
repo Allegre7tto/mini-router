@@ -1,6 +1,6 @@
 use rmpv::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BlockHash {
     Bytes(Vec<u8>),
     Integer(u64),
