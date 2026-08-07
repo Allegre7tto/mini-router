@@ -18,11 +18,11 @@ pub struct RouterMetrics {
 
 impl RouterMetrics {
     pub fn new() -> Result<Self, prometheus::Error> {
-        let requests =
-            Counter::new("router_requests_total", "Total routing requests")?;
-        let latency = Histogram::with_opts(
-            HistogramOpts::new("router_latency_seconds", "Routing latency"),
-        )?;
+        let requests = Counter::new("router_requests_total", "Total routing requests")?;
+        let latency = Histogram::with_opts(HistogramOpts::new(
+            "router_latency_seconds",
+            "Routing latency",
+        ))?;
         let token_count = Histogram::with_opts(HistogramOpts::new(
             "router_token_count",
             "Request token count",
@@ -39,30 +39,14 @@ impl RouterMetrics {
             "router_endpoint_decisions_total",
             "Selected endpoint counts",
         )?;
-        let fallbacks = Counter::new(
-            "router_fallbacks_total",
-            "Fallback routing decisions",
-        )?;
-        let event_duplicates = Counter::new(
-            "router_event_duplicates_total",
-            "Duplicate KV events",
-        )?;
-        let event_gaps =
-            Counter::new("router_event_gaps_total", "KV event gaps")?;
-        let event_replays = Counter::new(
-            "router_event_replays_total",
-            "Replay recoveries",
-        )?;
-        let index_size =
-            Gauge::new("router_index_size", "Prefix index node count")?;
-        let reservation_count = Gauge::new(
-            "router_reservation_count",
-            "Active reservations",
-        )?;
-        let active_endpoints = Gauge::new(
-            "router_active_endpoints",
-            "Active endpoint count",
-        )?;
+        let fallbacks = Counter::new("router_fallbacks_total", "Fallback routing decisions")?;
+        let event_duplicates =
+            Counter::new("router_event_duplicates_total", "Duplicate KV events")?;
+        let event_gaps = Counter::new("router_event_gaps_total", "KV event gaps")?;
+        let event_replays = Counter::new("router_event_replays_total", "Replay recoveries")?;
+        let index_size = Gauge::new("router_index_size", "Prefix index node count")?;
+        let reservation_count = Gauge::new("router_reservation_count", "Active reservations")?;
+        let active_endpoints = Gauge::new("router_active_endpoints", "Active endpoint count")?;
         Ok(RouterMetrics {
             requests,
             latency,
@@ -87,17 +71,14 @@ impl RouterMetrics {
         r.register(Box::new(self.token_count.clone())).ok();
         r.register(Box::new(self.matched_blocks.clone())).ok();
         r.register(Box::new(self.matched_tokens.clone())).ok();
-        r.register(Box::new(self.endpoint_decisions.clone()))
-            .ok();
+        r.register(Box::new(self.endpoint_decisions.clone())).ok();
         r.register(Box::new(self.fallbacks.clone())).ok();
         r.register(Box::new(self.event_duplicates.clone())).ok();
         r.register(Box::new(self.event_gaps.clone())).ok();
         r.register(Box::new(self.event_replays.clone())).ok();
         r.register(Box::new(self.index_size.clone())).ok();
-        r.register(Box::new(self.reservation_count.clone()))
-            .ok();
-        r.register(Box::new(self.active_endpoints.clone()))
-            .ok();
+        r.register(Box::new(self.reservation_count.clone())).ok();
+        r.register(Box::new(self.active_endpoints.clone())).ok();
         r
     }
 
@@ -105,7 +86,6 @@ impl RouterMetrics {
         let mut buffer = Vec::new();
         let encoder = TextEncoder::new();
         encoder.encode(&self.registry().gather(), &mut buffer)?;
-        String::from_utf8(buffer)
-            .map_err(|e| prometheus::Error::Msg(e.to_string()))
+        String::from_utf8(buffer).map_err(|e| prometheus::Error::Msg(e.to_string()))
     }
 }

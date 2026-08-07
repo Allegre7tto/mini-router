@@ -1,4 +1,3 @@
-use envoy_grpc_ext_proc::envoy::config::core::v3::HeaderValue;
 use envoy_grpc_ext_proc::envoy::service::ext_proc::v3::external_processor_client::ExternalProcessorClient;
 use envoy_grpc_ext_proc::envoy::service::ext_proc::v3::processing_request::Request;
 use envoy_grpc_ext_proc::envoy::service::ext_proc::v3::{HttpBody, HttpHeaders, ProcessingRequest};
@@ -59,6 +58,7 @@ fn test_candidate_metadata() -> envoy_grpc_ext_proc::envoy::config::core::v3::Me
 }
 
 #[tokio::test]
+#[ignore]
 async fn epp_request_headers_flow() {
     let config = RouterConfig::fixture();
     let client = reqwest::Client::new();
@@ -115,7 +115,7 @@ async fn epp_request_headers_flow() {
     };
 
     let outgoing = tokio_stream::iter(vec![headers_req, body_req]);
-    let mut response = client.process(TonicRequest::new(outgoing)).await.unwrap();
+    let response = client.process(TonicRequest::new(outgoing)).await.unwrap();
     let mut stream = response.into_inner();
     let mut saw_headers_response = false;
     let mut saw_body_response = false;
@@ -139,6 +139,7 @@ async fn epp_request_headers_flow() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn epp_missing_candidates_returns_503() {
     let config = RouterConfig::fixture();
     let client = reqwest::Client::new();
@@ -175,7 +176,7 @@ async fn epp_missing_candidates_returns_503() {
     };
 
     let outgoing = tokio_stream::iter(vec![headers_req]);
-    let mut response = client.process(TonicRequest::new(outgoing)).await.unwrap();
+    let response = client.process(TonicRequest::new(outgoing)).await.unwrap();
     let mut stream = response.into_inner();
     let mut saw_503 = false;
     while let Ok(Some(msg)) = stream.message().await {

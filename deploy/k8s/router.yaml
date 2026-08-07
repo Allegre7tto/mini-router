@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router
+  labels:
+    app: router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: router
+  template:
+    metadata:
+      labels:
+        app: router
+    spec:
+      serviceAccountName: router
+      containers:
+        - name: router
+          image: mini-router:test
+          ports:
+            - containerPort: 9000
+              name: epp
+            - containerPort: 9001
+              name: metrics
+          env:
+            - name: RUST_LOG
+              value: info
+          readinessProbe:
+            grpc:
+              port: 9000
+            initialDelaySeconds: 5
+          livenessProbe:
+            grpc:
+              port: 9000
+            initialDelaySeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        - name: renderer
+          image: vllm:render
+          command: ["vllm", "launch", "render", "fixed", "--host", "127.0.0.1", "--port", "8100"]
+          ports:
+            - containerPort: 8100
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-epp
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: router
+  ports:
+    - port: 9000
+      name: epp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-metrics
+spec:
+  type: ClusterIP
+  selector:
+    app: router
+  ports:
+    - port: 9001
+      name: metrics
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: router
