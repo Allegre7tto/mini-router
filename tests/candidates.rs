@@ -1,6 +1,6 @@
-use mini_router::epp::candidates::{CandidateError, parse};
-use mini_router::epp::response::{picked, served, unavailable};
-use mini_router::types::RoutingDecision;
+use router::epp::candidates::{CandidateError, parse};
+use router::epp::response::{picked, served, unavailable};
+use router::types::RoutingDecision;
 use prost_types::{ListValue, Struct, Value, value::Kind};
 use std::collections::BTreeMap;
 

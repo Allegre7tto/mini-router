@@ -1,5 +1,5 @@
 [package]
-name = "mini-router"
+name = "router"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
@@ -39,7 +39,7 @@ tower = "0.5"
 wiremock = "0.6"
 
 [[bin]]
-name = "mini-router"
+name = "router"
 path = "src/bin/router.rs"
 
 [[bin]]

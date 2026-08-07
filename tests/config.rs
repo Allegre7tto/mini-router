@@ -1,4 +1,4 @@
-use mini_router::{config::RouterConfig, types::WorkerKey};
+use router::{config::RouterConfig, types::WorkerKey};
 
 #[test]
 fn endpoint_is_canonical() {
