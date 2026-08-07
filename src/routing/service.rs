@@ -4,7 +4,7 @@ use crate::renderer::client::Renderer;
 use crate::renderer::request::validate;
 use crate::routing::scorer;
 use crate::types::{RoutingDecision, RoutingRequest, WorkerKey};
-use crate::workers::manager::EndpointManager;
+use crate::workers::manager::{Completion, EndpointManager};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -100,5 +100,9 @@ impl RoutingService {
             effective_load: scored.effective_load,
             body: body_bytes,
         })
+    }
+
+    pub async fn complete_served(&self, decision_id: Uuid, served: WorkerKey) -> Completion {
+        self.manager.complete(decision_id, served).await
     }
 }

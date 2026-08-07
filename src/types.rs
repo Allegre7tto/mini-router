@@ -28,7 +28,7 @@ impl FromStr for WorkerKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CandidateSet(pub BTreeSet<WorkerKey>);
 
 impl CandidateSet {

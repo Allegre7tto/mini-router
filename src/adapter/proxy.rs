@@ -1,4 +1,4 @@
-use crate::adapter::transform::{TransformError, transform};
+use crate::adapter::transform::transform;
 use crate::config::AdapterConfig;
 use axum::{
     Router,

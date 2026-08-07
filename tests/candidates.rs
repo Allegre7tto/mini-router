@@ -1,7 +1,7 @@
+use prost_types::{ListValue, Struct, Value, value::Kind};
 use router::epp::candidates::{CandidateError, parse};
 use router::epp::response::{picked, served, unavailable};
 use router::types::RoutingDecision;
-use prost_types::{ListValue, Struct, Value, value::Kind};
 use std::collections::BTreeMap;
 
 fn metadata_subset(endpoints: &[&str]) -> Struct {
