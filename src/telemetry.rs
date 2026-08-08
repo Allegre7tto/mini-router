@@ -1,6 +1,7 @@
 use prometheus::{Counter, Encoder, Gauge, Histogram, HistogramOpts, Registry, TextEncoder};
 
 pub struct RouterMetrics {
+    registry: Registry,
     pub requests: Counter,
     pub latency: Histogram,
     pub token_count: Histogram,
@@ -18,6 +19,7 @@ pub struct RouterMetrics {
 
 impl RouterMetrics {
     pub fn new() -> Result<Self, prometheus::Error> {
+        let registry = Registry::new();
         let requests = Counter::new("router_requests_total", "Total routing requests")?;
         let latency = Histogram::with_opts(HistogramOpts::new(
             "router_latency_seconds",
@@ -47,7 +49,23 @@ impl RouterMetrics {
         let index_size = Gauge::new("router_index_size", "Prefix index node count")?;
         let reservation_count = Gauge::new("router_reservation_count", "Active reservations")?;
         let active_endpoints = Gauge::new("router_active_endpoints", "Active endpoint count")?;
+
+        registry.register(Box::new(requests.clone()))?;
+        registry.register(Box::new(latency.clone()))?;
+        registry.register(Box::new(token_count.clone()))?;
+        registry.register(Box::new(matched_blocks.clone()))?;
+        registry.register(Box::new(matched_tokens.clone()))?;
+        registry.register(Box::new(endpoint_decisions.clone()))?;
+        registry.register(Box::new(fallbacks.clone()))?;
+        registry.register(Box::new(event_duplicates.clone()))?;
+        registry.register(Box::new(event_gaps.clone()))?;
+        registry.register(Box::new(event_replays.clone()))?;
+        registry.register(Box::new(index_size.clone()))?;
+        registry.register(Box::new(reservation_count.clone()))?;
+        registry.register(Box::new(active_endpoints.clone()))?;
+
         Ok(RouterMetrics {
+            registry,
             requests,
             latency,
             token_count,
@@ -64,28 +82,9 @@ impl RouterMetrics {
         })
     }
 
-    pub fn registry(&self) -> Registry {
-        let r = Registry::new();
-        r.register(Box::new(self.requests.clone())).ok();
-        r.register(Box::new(self.latency.clone())).ok();
-        r.register(Box::new(self.token_count.clone())).ok();
-        r.register(Box::new(self.matched_blocks.clone())).ok();
-        r.register(Box::new(self.matched_tokens.clone())).ok();
-        r.register(Box::new(self.endpoint_decisions.clone())).ok();
-        r.register(Box::new(self.fallbacks.clone())).ok();
-        r.register(Box::new(self.event_duplicates.clone())).ok();
-        r.register(Box::new(self.event_gaps.clone())).ok();
-        r.register(Box::new(self.event_replays.clone())).ok();
-        r.register(Box::new(self.index_size.clone())).ok();
-        r.register(Box::new(self.reservation_count.clone())).ok();
-        r.register(Box::new(self.active_endpoints.clone())).ok();
-        r
-    }
-
     pub fn encode(&self) -> Result<String, prometheus::Error> {
-        let mut buffer = Vec::new();
-        let encoder = TextEncoder::new();
-        encoder.encode(&self.registry().gather(), &mut buffer)?;
-        String::from_utf8(buffer).map_err(|e| prometheus::Error::Msg(e.to_string()))
+        let mut buf = Vec::new();
+        TextEncoder::new().encode(&self.registry.gather(), &mut buf)?;
+        String::from_utf8(buf).map_err(|e| prometheus::Error::Msg(e.to_string()))
     }
 }

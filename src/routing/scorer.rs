@@ -29,14 +29,14 @@ pub fn choose(
     snapshots: &[EndpointSnapshot],
     config: &RouterConfig,
 ) -> Result<ScoredEndpoint, RoutingError> {
-    let snap_map: BTreeMap<_, _> = snapshots.iter().map(|s| (&s.key, s)).collect();
+    let snaps: BTreeMap<_, _> = snapshots.iter().map(|s| (&s.key, s)).collect();
 
-    let mut scored: Vec<_> = candidates
+    candidates
         .0
         .iter()
         .filter_map(|w| {
-            let snap = snap_map.get(w)?;
-            let cache_score = if snap.trust == Trust::Trusted {
+            let snap = snaps.get(w)?;
+            let cache = if snap.trust == Trust::Trusted {
                 matches
                     .get(w)
                     .map(|m| m.tokens as f64 / token_count as f64)
@@ -44,44 +44,36 @@ pub fn choose(
             } else {
                 0.0
             };
-            let effective = (snap
+            let load = (snap
                 .load
                 .as_ref()
                 .map(|l| l.running + l.waiting)
-                .unwrap_or(0))
-                + snap.reservations as u64;
-            let load_score = effective as f64 / config.max_concurrency as f64;
-            let score = config.cache_weight * cache_score - config.load_weight * load_score;
+                .unwrap_or(0)
+                + snap.reservations as u64) as f64
+                / config.max_concurrency as f64;
             Some(ScoredEndpoint {
                 endpoint: w.clone(),
                 generation: snap.generation,
-                score,
+                score: config.cache_weight * cache - config.load_weight * load,
                 matched_tokens: matches.get(w).map(|m| m.tokens).unwrap_or(0),
-                effective_load: load_score,
+                effective_load: load,
             })
         })
-        .collect();
-
-    scored.sort_by(|a, b| {
-        let cmp = b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        let ha = hash_endpoint(request_id, &a.endpoint);
-        let hb = hash_endpoint(request_id, &b.endpoint);
-        ha.cmp(&hb)
-    });
-
-    scored
-        .into_iter()
-        .next()
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| {
+                    tiebreak(request_id, &b.endpoint).cmp(&tiebreak(request_id, &a.endpoint))
+                })
+        })
         .ok_or(RoutingError::NoEligibleEndpoint)
 }
 
-fn hash_endpoint(request_id: &str, endpoint: &WorkerKey) -> Vec<u8> {
+fn tiebreak(request_id: &str, endpoint: &WorkerKey) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(request_id.as_bytes());
     hasher.update([0u8]);
     hasher.update(endpoint.to_string().as_bytes());
-    hasher.finalize().to_vec()
+    hasher.finalize().into()
 }

@@ -1,11 +1,13 @@
 use crate::config::RouterConfig;
-use crate::routing::load::parse_metrics;
+use crate::routing::load::{LoadError, parse_metrics};
 use crate::types::{CandidateSet, WorkerKey};
 use crate::workers::endpoint::{EndpointSnapshot, LoadSample, Trust};
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+const METRICS_PORT: u16 = 8000;
 
 #[derive(Debug)]
 pub enum Completion {
@@ -14,28 +16,13 @@ pub enum Completion {
     Unknown,
 }
 
-#[derive(Debug)]
-struct Reservation {
-    #[allow(dead_code)]
-    decision_id: Uuid,
-    #[allow(dead_code)]
-    worker: WorkerKey,
-    expires: Instant,
-}
-
 struct EndpointState {
     key: WorkerKey,
     generation: u64,
     trust: Trust,
     last_load: Option<LoadSample>,
-    reservations: HashMap<Uuid, Reservation>,
+    reservations: HashMap<Uuid, Instant>,
     last_seen: Instant,
-    #[allow(dead_code)]
-    metric_port: u16,
-    #[allow(dead_code)]
-    kv_port: u16,
-    #[allow(dead_code)]
-    replay_port: u16,
 }
 
 impl EndpointState {
@@ -68,7 +55,7 @@ impl EndpointManager {
     pub async fn observe(&self, candidates: &CandidateSet, now: Instant) {
         let mut states = self.states.lock().await;
         for worker in &candidates.0 {
-            let entry = states
+            states
                 .entry(worker.clone())
                 .or_insert_with(|| EndpointState {
                     key: worker.clone(),
@@ -77,11 +64,8 @@ impl EndpointManager {
                     last_load: None,
                     reservations: HashMap::new(),
                     last_seen: now,
-                    metric_port: 8000,
-                    kv_port: 5557,
-                    replay_port: 5558,
-                });
-            entry.last_seen = now;
+                })
+                .last_seen = now;
         }
     }
 
@@ -94,29 +78,22 @@ impl EndpointManager {
             .collect()
     }
 
-    pub async fn reserve(&self, decision_id: Uuid, worker: WorkerKey, expires: Instant) {
+    pub async fn reserve(&self, decision: Uuid, worker: WorkerKey, expires: Instant) {
         let mut states = self.states.lock().await;
         if let Some(state) = states.get_mut(&worker) {
-            state.reservations.insert(
-                decision_id,
-                Reservation {
-                    decision_id,
-                    worker: worker.clone(),
-                    expires,
-                },
-            );
+            state.reservations.insert(decision, expires);
         }
     }
 
-    pub async fn complete(&self, decision_id: Uuid, served: WorkerKey) -> Completion {
+    pub async fn complete(&self, decision: Uuid, served: WorkerKey) -> Completion {
         let mut states = self.states.lock().await;
         for state in states.values_mut() {
-            if state.reservations.remove(&decision_id).is_some() {
-                if state.key == served {
-                    return Completion::Released;
+            if state.reservations.remove(&decision).is_some() {
+                return if state.key == served {
+                    Completion::Released
                 } else {
-                    return Completion::Mismatch;
-                }
+                    Completion::Mismatch
+                };
             }
         }
         Completion::Unknown
@@ -125,33 +102,28 @@ impl EndpointManager {
     pub async fn reap(&self, now: Instant) {
         let mut states = self.states.lock().await;
         for state in states.values_mut() {
-            state.reservations.retain(|_, r| r.expires > now);
+            state.reservations.retain(|_, expires| *expires > now);
         }
         states.retain(|_, state| {
             now.duration_since(state.last_seen).as_secs() < self.config.endpoint_state_ttl_secs
         });
     }
 
-    pub async fn fetch_load(
-        &self,
-        worker: &WorkerKey,
-    ) -> Result<LoadSample, crate::routing::load::LoadError> {
-        let url = format!("http://{}:{}/metrics", worker.0.ip(), 8000);
-        let resp = self
+    pub async fn fetch_load(&self, worker: &WorkerKey) -> Result<LoadSample, LoadError> {
+        let text = self
             .client
-            .get(&url)
+            .get(format!("http://{}:{METRICS_PORT}/metrics", worker.0.ip()))
             .send()
             .await
-            .map_err(|e| crate::routing::load::LoadError::Http(e.to_string()))?;
-        let text = resp
+            .map_err(|e| LoadError::Http(e.to_string()))?
             .text()
             .await
-            .map_err(|e| crate::routing::load::LoadError::Http(e.to_string()))?;
-        let metrics = parse_metrics(&text)?;
+            .map_err(|e| LoadError::Http(e.to_string()))?;
+        let parsed = parse_metrics(&text)?;
         Ok(LoadSample {
-            running: metrics.running,
-            waiting: metrics.waiting,
-            kv_usage: metrics.kv_usage,
+            running: parsed.running,
+            waiting: parsed.waiting,
+            kv_usage: parsed.kv_usage,
             collected_at: Instant::now(),
         })
     }

@@ -33,17 +33,12 @@ impl Subscriber {
         sender: mpsc::Sender<SequencedBatch>,
         cancel: CancellationToken,
     ) {
-        let endpoint = self.endpoint.clone();
+        let addr = self.endpoint.0.ip().to_string();
         let topic = self.topic.clone();
-        let addr = endpoint.0.ip().to_string();
 
         std::thread::spawn(move || {
             let ctx = zmq::Context::new();
-            let pub_url = format!("tcp://{addr}:{kv_port}");
-            let replay_url = format!("tcp://{addr}:{replay_port}");
-            let topic_bytes = topic.as_bytes();
-
-            let sub_socket = match ctx.socket(zmq::SUB) {
+            let sub = match ctx.socket(zmq::SUB) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("failed to create SUB socket: {e}");
@@ -51,11 +46,11 @@ impl Subscriber {
                 }
             };
 
-            if let Err(e) = sub_socket.connect(&pub_url) {
-                tracing::error!("failed to connect SUB to {pub_url}: {e}");
+            if let Err(e) = sub.connect(&format!("tcp://{addr}:{kv_port}")) {
+                tracing::error!("failed to connect SUB to {addr}:{kv_port}: {e}");
                 return;
             }
-            if let Err(e) = sub_socket.set_subscribe(topic_bytes) {
+            if let Err(e) = sub.set_subscribe(topic.as_bytes()) {
                 tracing::error!("failed to subscribe: {e}");
                 return;
             }
@@ -64,11 +59,11 @@ impl Subscriber {
 
             loop {
                 if cancel.is_cancelled() {
-                    let _ = sub_socket.set_linger(0);
+                    let _ = sub.set_linger(0);
                     break;
                 }
 
-                match sub_socket.poll(zmq::POLLIN, POLL_TIMEOUT_MS) {
+                match sub.poll(zmq::POLLIN, POLL_TIMEOUT_MS) {
                     Ok(0) => continue,
                     Ok(_) => {}
                     Err(e) => {
@@ -77,7 +72,7 @@ impl Subscriber {
                     }
                 }
 
-                let frames = match sub_socket.recv_multipart(0) {
+                let frames = match sub.recv_multipart(0) {
                     Ok(f) => f,
                     Err(e) => {
                         if cancel.is_cancelled() {
@@ -92,9 +87,8 @@ impl Subscriber {
                     continue;
                 }
 
-                let frame_refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
-
-                let batch = match decode(&frame_refs) {
+                let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
+                let batch = match decode(&refs) {
                     Ok(b) => b,
                     Err(e) => {
                         tracing::warn!("decode error: {e}");
@@ -107,34 +101,31 @@ impl Subscriber {
                 }
 
                 if batch.sequence > expected {
-                    let replay_ctx = zmq::Context::new();
-                    if let Ok(req) = replay_ctx.socket(zmq::REQ)
-                        && req.connect(&replay_url).is_ok()
+                    let replay = zmq::Context::new();
+                    if let Ok(req) = replay.socket(zmq::REQ)
+                        && req.connect(&format!("tcp://{addr}:{replay_port}")).is_ok()
                         && req.set_rcvtimeo(REPLAY_TIMEOUT_MS).is_ok()
                         && req.set_sndtimeo(REPLAY_TIMEOUT_MS).is_ok()
                     {
-                        let req_bytes = expected.to_be_bytes();
-                        let _ = req.send(&req_bytes[..], 0);
-                        while let Ok(replay_frames) = req.recv_multipart(0) {
-                            if replay_frames.len() < 4 {
+                        let _ = req.send(expected.to_be_bytes().as_slice(), 0);
+                        while let Ok(frames) = req.recv_multipart(0) {
+                            if frames.len() < 4 {
                                 break;
                             }
-                            if replay_frames.len() >= 5 && replay_frames[2].is_empty() {
-                                if replay_frames[3].len() >= 8 {
-                                    let end_seq = i64::from_be_bytes(
-                                        replay_frames[3][..8].try_into().unwrap_or([0; 8]),
-                                    );
-                                    if end_seq == -1 {
-                                        break;
-                                    }
+                            if frames.len() >= 5 && frames[2].is_empty() {
+                                if frames[3].len() >= 8
+                                    && i64::from_be_bytes(
+                                        frames[3][..8].try_into().unwrap_or([0; 8]),
+                                    ) == -1
+                                {
+                                    break;
                                 }
                                 continue;
                             }
-                            if replay_frames.len() == 5 {
-                                let r_refs: Vec<&[u8]> =
-                                    vec![&replay_frames[2], &replay_frames[3], &replay_frames[4]];
-                                if let Ok(r_batch) = decode(&r_refs) {
-                                    let _ = sender.blocking_send(r_batch);
+                            if frames.len() == 5 {
+                                let refs: Vec<&[u8]> = vec![&frames[2], &frames[3], &frames[4]];
+                                if let Ok(batch) = decode(&refs) {
+                                    let _ = sender.blocking_send(batch);
                                 }
                             }
                         }

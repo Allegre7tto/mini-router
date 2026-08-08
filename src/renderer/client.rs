@@ -1,7 +1,6 @@
 use crate::types::RenderedInput;
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
@@ -64,10 +63,9 @@ impl HttpRenderer {
 #[async_trait]
 impl Renderer for HttpRenderer {
     async fn render(&self, body: &serde_json::Value) -> Result<RenderedInput, RenderError> {
-        let url = format!("{}/v1/chat/completions/render", self.base_url);
         let resp = self
             .client
-            .post(&url)
+            .post(format!("{}/v1/chat/completions/render", self.base_url))
             .json(body)
             .send()
             .await
@@ -80,43 +78,37 @@ impl Renderer for HttpRenderer {
             )));
         }
 
-        let render_resp: RenderResponse = resp
+        let rendered: RenderResponse = resp
             .json()
             .await
             .map_err(|e| RenderError::Http(e.to_string()))?;
 
-        if render_resp.token_ids.is_empty() {
+        if rendered.token_ids.is_empty() {
             return Err(RenderError::EmptyTokens);
         }
-
-        if render_resp.token_ids.len() > self.max_token_count {
+        if rendered.token_ids.len() > self.max_token_count {
             return Err(RenderError::TooManyTokens);
         }
 
         Ok(RenderedInput {
-            token_ids: Arc::from(render_resp.token_ids.into_boxed_slice()),
+            token_ids: rendered.token_ids.into(),
         })
     }
 
     async fn ready(&self, model: &str) -> Result<(), RenderError> {
-        let url = format!("{}/v1/models", self.base_url);
-        let resp = self
+        let models: ModelsResponse = self
             .client
-            .get(&url)
+            .get(format!("{}/v1/models", self.base_url))
             .send()
             .await
-            .map_err(|e| RenderError::Http(e.to_string()))?;
-
-        let models: ModelsResponse = resp
+            .map_err(|e| RenderError::Http(e.to_string()))?
             .json()
             .await
             .map_err(|e| RenderError::Http(e.to_string()))?;
 
-        let found = models.data.iter().any(|m| m.id == model);
-        if !found {
+        if !models.data.iter().any(|m| m.id == model) {
             return Err(RenderError::ModelNotFound);
         }
-
         Ok(())
     }
 }

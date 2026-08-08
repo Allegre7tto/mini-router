@@ -3,62 +3,99 @@
 async fn main() -> anyhow::Result<()> {
     use axum::{
         Json, Router,
-        extract::State,
         routing::{get, post},
     };
     use rmpv::Value;
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+
+    type Replay = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
 
     #[derive(Clone, Default)]
     struct MockState {
-        load: Arc<Mutex<LoadData>>,
-        chat_requests: Arc<Mutex<Vec<serde_json::Value>>>,
-        replay: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
+        load: Arc<Mutex<Load>>,
+        chats: Arc<Mutex<Vec<serde_json::Value>>>,
+        replay: Replay,
         seq: Arc<Mutex<u64>>,
     }
 
-    #[derive(Clone, Default)]
-    struct LoadData {
+    #[derive(Clone, Default, serde::Deserialize)]
+    struct Load {
         running: u64,
         waiting: u64,
         kv_usage: f64,
     }
 
-    let state = MockState::default();
-    let state_clone = state.clone();
+    fn msgpack(v: &serde_json::Value) -> Value {
+        match v {
+            serde_json::Value::String(s) => Value::String(s.as_str().into()),
+            serde_json::Value::Number(n) => Value::Integer(n.as_i64().unwrap_or_default().into()),
+            _ => Value::Nil,
+        }
+    }
 
+    fn array(v: &serde_json::Value) -> Vec<Value> {
+        v.as_array()
+            .map(|a| a.iter().map(msgpack).collect())
+            .unwrap_or_default()
+    }
+
+    fn record(s: &MockState, batch: Value) -> Json<serde_json::Value> {
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &batch).unwrap();
+        let mut seq = s.seq.lock().unwrap();
+        let current = *seq;
+        *seq += 1;
+        s.replay.lock().unwrap().push((current, buf));
+        Json(serde_json::json!({ "sequence": current }))
+    }
+
+    let state = MockState::default();
+
+    let s = state.clone();
     std::thread::spawn(move || {
         let ctx = zmq::Context::new();
         let pub_socket = ctx.socket(zmq::PUB).unwrap();
         pub_socket.bind("tcp://*:5557").unwrap();
-
         let router_socket = ctx.socket(zmq::ROUTER).unwrap();
         router_socket.bind("tcp://*:5558").unwrap();
 
-        let topic = b"kv-events";
+        let empty: &[u8] = b"";
+        let topic: &[u8] = b"kv-events";
         loop {
-            if router_socket.poll(zmq::POLLIN, 100).is_ok_and(|r| r > 0) {
-                if let Ok(frames) = router_socket.recv_multipart(0) {
-                    if frames.len() >= 3 {
-                        let seq = u64::from_be_bytes(frames[2][..8].try_into().unwrap_or([0; 8]));
-                        let replay = state_clone.replay.lock().unwrap();
-                        for (s, payload) in replay.iter() {
-                            if *s >= seq {
-                                let seq_bytes = s.to_be_bytes();
-                                let _ = router_socket.send_multipart(
-                                    &[&frames[0], b"", topic, &seq_bytes, payload],
-                                    0,
-                                );
-                            }
-                        }
-                        let _ = router_socket.send_multipart(
-                            &[&frames[0], b"", b"", &(-1i64).to_be_bytes(), b""],
-                            0,
-                        );
-                    }
+            if !router_socket.poll(zmq::POLLIN, 100).is_ok_and(|r| r > 0) {
+                continue;
+            }
+            let Ok(frames) = router_socket.recv_multipart(0) else {
+                continue;
+            };
+            if frames.len() < 3 {
+                continue;
+            }
+            let from = u64::from_be_bytes(frames[2][..8].try_into().unwrap_or([0; 8]));
+            for (seq, payload) in s.replay.lock().unwrap().iter() {
+                if *seq >= from {
+                    let _ = router_socket.send_multipart(
+                        [
+                            frames[0].as_slice(),
+                            empty,
+                            topic,
+                            seq.to_be_bytes().as_slice(),
+                            payload.as_slice(),
+                        ],
+                        0,
+                    );
                 }
             }
+            let _ = router_socket.send_multipart(
+                [
+                    frames[0].as_slice(),
+                    empty,
+                    empty,
+                    (-1i64).to_be_bytes().as_slice(),
+                    empty,
+                ],
+                0,
+            );
         }
     });
 
@@ -75,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }))
         .route("/v1/chat/completions/render", post({
-            |Json(body): Json<serde_json::Value>| async move {
+            |Json(_): Json<serde_json::Value>| async move {
                 Json(serde_json::json!({
                     "request_id": "mock-r1",
                     "token_ids": [1, 2, 3, 4],
@@ -85,108 +122,104 @@ async fn main() -> anyhow::Result<()> {
         }))
         .route("/v1/chat/completions", post({
             let s = state.clone();
-            |Json(body): Json<serde_json::Value>| async move {
-                s.chat_requests.lock().unwrap().push(body);
-                Json(serde_json::json!({
-                    "choices": [{"message": {"role": "assistant", "content": "mock response"}}]
-                }))
+            move |Json(body): Json<serde_json::Value>| {
+                let s = s.clone();
+                async move {
+                    s.chats.lock().unwrap().push(body);
+                    Json(serde_json::json!({
+                        "choices": [{"message": {"role": "assistant", "content": "mock response"}}]
+                    }))
+                }
             }
         }))
         .route("/control/load", post({
             let s = state.clone();
-            |Json(load): Json<LoadData>| async move {
-                *s.load.lock().unwrap() = load;
-                "ok"
+            move |Json(load): Json<Load>| {
+                let s = s.clone();
+                async move {
+                    *s.load.lock().unwrap() = load;
+                    "ok"
+                }
             }
         }))
         .route("/control/store", post({
             let s = state.clone();
-            |Json(body): Json<serde_json::Value>| async move {
-                let batch = Value::Array(vec![
-                    Value::F64(1.0),
-                    Value::Array(vec![Value::Map(vec![
+            move |Json(body): Json<serde_json::Value>| {
+                let s = s.clone();
+                async move {
+                    let event = Value::Map(vec![
                         (Value::String("type".into()), Value::String("BlockStored".into())),
-                        (Value::String("block_hashes".into()), Value::Array(
-                            body["block_hashes"].as_array().cloned().unwrap_or_default()
-                        )),
-                        (Value::String("token_ids".into()), Value::Array(
-                            body["token_ids"].as_array().cloned().unwrap_or_default()
-                        )),
-                        (Value::String("block_size".into()), Value::Integer(body.get("block_size").and_then(|v| v.as_i64()).unwrap_or(4).into())),
-                    ])]),
-                ]);
-                let mut buf = Vec::new();
-                rmpv::encode::write_value(&mut buf, &batch).unwrap();
-                let mut seq = s.seq.lock().unwrap();
-                let current = *seq;
-                *seq += 1;
-                s.replay.lock().unwrap().push((current, buf.clone()));
-                Json(serde_json::json!({"sequence": current}))
+                        (
+                            Value::String("block_hashes".into()),
+                            Value::Array(array(&body["block_hashes"])),
+                        ),
+                        (
+                            Value::String("token_ids".into()),
+                            Value::Array(array(&body["token_ids"])),
+                        ),
+                        (
+                            Value::String("block_size".into()),
+                            Value::Integer(body["block_size"].as_i64().unwrap_or(4).into()),
+                        ),
+                    ]);
+                    record(&s, Value::Array(vec![Value::F64(1.0), Value::Array(vec![event])]))
+                }
             }
         }))
         .route("/control/remove", post({
             let s = state.clone();
-            |Json(body): Json<serde_json::Value>| async move {
-                let batch = Value::Array(vec![
-                    Value::F64(1.0),
-                    Value::Array(vec![Value::Map(vec![
+            move |Json(body): Json<serde_json::Value>| {
+                let s = s.clone();
+                async move {
+                    let event = Value::Map(vec![
                         (Value::String("type".into()), Value::String("BlockRemoved".into())),
-                        (Value::String("block_hashes".into()), Value::Array(
-                            body["block_hashes"].as_array().cloned().unwrap_or_default()
-                        )),
-                    ])]),
-                ]);
-                let mut buf = Vec::new();
-                rmpv::encode::write_value(&mut buf, &batch).unwrap();
-                let mut seq = s.seq.lock().unwrap();
-                let current = *seq;
-                *seq += 1;
-                s.replay.lock().unwrap().push((current, buf.clone()));
-                Json(serde_json::json!({"sequence": current}))
+                        (
+                            Value::String("block_hashes".into()),
+                            Value::Array(array(&body["block_hashes"])),
+                        ),
+                    ]);
+                    record(&s, Value::Array(vec![Value::F64(1.0), Value::Array(vec![event])]))
+                }
             }
         }))
         .route("/control/clear", post({
             let s = state.clone();
-            |Json(_body): Json<serde_json::Value>| async move {
-                let batch = Value::Array(vec![
-                    Value::F64(1.0),
-                    Value::Array(vec![Value::Map(vec![(
+            move |Json(_): Json<serde_json::Value>| {
+                let s = s.clone();
+                async move {
+                    let event = Value::Map(vec![(
                         Value::String("type".into()),
                         Value::String("AllBlocksCleared".into()),
-                    )])]),
-                ]);
-                let mut buf = Vec::new();
-                rmpv::encode::write_value(&mut buf, &batch).unwrap();
-                let mut seq = s.seq.lock().unwrap();
-                let current = *seq;
-                *seq += 1;
-                s.replay.lock().unwrap().push((current, buf.clone()));
-                Json(serde_json::json!({"sequence": current}))
+                    )]);
+                    record(&s, Value::Array(vec![Value::F64(1.0), Value::Array(vec![event])]))
+                }
             }
         }))
         .route("/control/gap", post({
             let s = state.clone();
-            |Json(body): Json<serde_json::Value>| async move {
-                let skip = body["skip"].as_u64().unwrap_or(1);
-                let retain = body["retain"].as_bool().unwrap_or(true);
-                let mut seq = s.seq.lock().unwrap();
-                *seq += skip;
-                if !retain {
-                    s.replay.lock().unwrap().clear();
+            move |Json(body): Json<serde_json::Value>| {
+                let s = s.clone();
+                async move {
+                    let skip = body["skip"].as_u64().unwrap_or(1);
+                    let retain = body["retain"].as_bool().unwrap_or(true);
+                    let mut seq = s.seq.lock().unwrap();
+                    *seq += skip;
+                    if !retain {
+                        s.replay.lock().unwrap().clear();
+                    }
+                    Json(serde_json::json!({ "skipped_to": *seq }))
                 }
-                Json(serde_json::json!({"skipped_to": *seq}))
             }
         }))
         .route("/control/last", get({
             let s = state;
             move || async move {
-                let reqs = s.chat_requests.lock().unwrap();
-                Json(reqs.last().cloned().unwrap_or_default())
+                let chats = s.chats.lock().unwrap();
+                Json(chats.last().cloned().unwrap_or_default())
             }
         }));
 
-    let addr = "0.0.0.0:8000".parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
     axum::serve(listener, app).await?;
     Ok(())
 }

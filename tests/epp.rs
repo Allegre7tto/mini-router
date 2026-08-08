@@ -121,8 +121,8 @@ async fn epp_request_headers_flow() {
     let mut saw_body_response = false;
 
     while let Ok(Some(msg)) = stream.message().await {
-        match &msg.response {
-            Some(ep_resp) => match ep_resp {
+        if let Some(ep_resp) = &msg.response {
+            match ep_resp {
                 envoy_grpc_ext_proc::envoy::service::ext_proc::v3::processing_response::Response::RequestHeaders(_) => {
                     saw_headers_response = true;
                 }
@@ -130,8 +130,7 @@ async fn epp_request_headers_flow() {
                     saw_body_response = true;
                 }
                 _ => {}
-            },
-            None => {}
+            }
         }
     }
     assert!(saw_headers_response);
@@ -180,13 +179,13 @@ async fn epp_missing_candidates_returns_503() {
     let mut stream = response.into_inner();
     let mut saw_503 = false;
     while let Ok(Some(msg)) = stream.message().await {
-        if let Some(ep_resp) = &msg.response {
-            if matches!(
+        if let Some(ep_resp) = &msg.response
+            && matches!(
                 ep_resp,
                 envoy_grpc_ext_proc::envoy::service::ext_proc::v3::processing_response::Response::ImmediateResponse(_)
-            ) {
-                saw_503 = true;
-            }
+            )
+        {
+            saw_503 = true;
         }
     }
     assert!(saw_503);

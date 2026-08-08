@@ -10,6 +10,8 @@ use envoy_grpc_ext_proc::envoy::service::ext_proc::v3::{
 };
 use envoy_grpc_ext_proc::envoy::r#type::v3::{HttpStatus, StatusCode};
 use prost_types::value::Kind;
+use prost_types::{Struct, Value};
+use std::collections::BTreeMap;
 
 pub const PICK_NAMESPACE: &str = "envoy.lb";
 pub const PICK_KEY: &str = "x-gateway-destination-endpoint";
@@ -17,53 +19,41 @@ pub const SERVED_KEY: &str = "x-gateway-destination-endpoint-served";
 
 pub fn picked(decision: &RoutingDecision) -> ProcessingResponse {
     let endpoint = decision.endpoint.to_string();
-
-    let header_mutation = HeaderMutation {
-        set_headers: vec![HeaderValueOption {
-            header: Some(HeaderValue {
-                key: PICK_KEY.to_string(),
-                value: endpoint.clone(),
-                raw_value: vec![],
-            }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    let body_mutation = BodyMutation {
-        mutation: Some(Mutation::Body(decision.body.clone())),
-    };
-
-    let common_response = CommonResponse {
-        status: ResponseStatus::ContinueAndReplace as i32,
-        header_mutation: Some(header_mutation),
-        body_mutation: Some(body_mutation),
-        ..Default::default()
-    };
-
-    let mut pick_fields = std::collections::BTreeMap::new();
-    pick_fields.insert(
-        PICK_KEY.to_string(),
-        prost_types::Value {
-            kind: Some(Kind::StringValue(endpoint)),
-        },
-    );
-    let mut dynamic_fields = std::collections::BTreeMap::new();
-    dynamic_fields.insert(
-        PICK_NAMESPACE.to_string(),
-        prost_types::Value {
-            kind: Some(Kind::StructValue(prost_types::Struct {
-                fields: pick_fields,
-            })),
-        },
-    );
-
     ProcessingResponse {
         response: Some(Response::RequestBody(BodyResponse {
-            response: Some(common_response),
+            response: Some(CommonResponse {
+                status: ResponseStatus::ContinueAndReplace as i32,
+                header_mutation: Some(HeaderMutation {
+                    set_headers: vec![HeaderValueOption {
+                        header: Some(HeaderValue {
+                            key: PICK_KEY.into(),
+                            value: endpoint.clone(),
+                            raw_value: vec![],
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                body_mutation: Some(BodyMutation {
+                    mutation: Some(Mutation::Body(decision.body.clone())),
+                }),
+                ..Default::default()
+            }),
         })),
-        dynamic_metadata: Some(prost_types::Struct {
-            fields: dynamic_fields,
+        dynamic_metadata: Some(Struct {
+            fields: BTreeMap::from([(
+                PICK_NAMESPACE.into(),
+                Value {
+                    kind: Some(Kind::StructValue(Struct {
+                        fields: BTreeMap::from([(
+                            PICK_KEY.into(),
+                            Value {
+                                kind: Some(Kind::StringValue(endpoint)),
+                            },
+                        )]),
+                    })),
+                },
+            )]),
         }),
         ..Default::default()
     }
@@ -82,25 +72,20 @@ pub fn unavailable(message: &str) -> ProcessingResponse {
     }
 }
 
-pub fn served(metadata: &prost_types::Struct) -> Result<Option<WorkerKey>, CandidateError> {
-    let lb = match metadata.fields.get(PICK_NAMESPACE) {
-        Some(v) => match &v.kind {
-            Some(Kind::StructValue(s)) => s,
-            _ => return Ok(None),
-        },
-        None => return Ok(None),
+pub fn served(metadata: &Struct) -> Result<Option<WorkerKey>, CandidateError> {
+    let Some(Kind::StructValue(lb)) = metadata
+        .fields
+        .get(PICK_NAMESPACE)
+        .and_then(|v| v.kind.as_ref())
+    else {
+        return Ok(None);
     };
-
-    let endpoint = match lb.fields.get(SERVED_KEY) {
-        Some(v) => match &v.kind {
-            Some(Kind::StringValue(s)) => s.clone(),
-            _ => return Ok(None),
-        },
-        None => return Ok(None),
+    let Some(Kind::StringValue(endpoint)) = lb.fields.get(SERVED_KEY).and_then(|v| v.kind.as_ref())
+    else {
+        return Ok(None);
     };
-
-    let addr: std::net::SocketAddr = endpoint
+    let addr = endpoint
         .parse()
-        .map_err(|_| CandidateError::InvalidEndpoint(endpoint))?;
+        .map_err(|_| CandidateError::InvalidEndpoint(endpoint.clone()))?;
     Ok(Some(WorkerKey(addr)))
 }

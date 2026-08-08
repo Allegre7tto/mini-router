@@ -25,39 +25,31 @@ pub fn parse(metadata: &prost_types::Struct, limit: usize) -> Result<CandidateSe
         .fields
         .get(SUBSET_NAMESPACE)
         .ok_or(CandidateError::MissingSubset)?;
-
-    let subset_struct = match &hint.kind {
-        Some(Kind::StructValue(s)) => s,
-        _ => return Err(CandidateError::MissingSubset),
+    let Some(Kind::StructValue(subset)) = &hint.kind else {
+        return Err(CandidateError::MissingSubset);
     };
-
-    let list = match subset_struct.fields.get(SUBSET_KEY) {
-        Some(v) => match &v.kind {
-            Some(Kind::ListValue(l)) => l,
-            _ => return Err(CandidateError::EmptySubset),
-        },
-        None => return Err(CandidateError::EmptySubset),
+    let Some(Kind::ListValue(list)) = subset.fields.get(SUBSET_KEY).and_then(|v| v.kind.as_ref())
+    else {
+        return Err(CandidateError::EmptySubset);
     };
 
     if list.values.is_empty() {
         return Err(CandidateError::EmptySubset);
     }
-
     if list.values.len() > limit {
         return Err(CandidateError::TooManyCandidates);
     }
 
     let mut seen = BTreeSet::new();
     for v in &list.values {
-        let s = match &v.kind {
-            Some(Kind::StringValue(s)) => s.as_str(),
-            _ => return Err(CandidateError::InvalidEndpoint("non-string value".into())),
+        let Some(Kind::StringValue(s)) = &v.kind else {
+            return Err(CandidateError::InvalidEndpoint("non-string value".into()));
         };
         let addr: SocketAddr = s
             .parse()
-            .map_err(|_| CandidateError::InvalidEndpoint(s.to_string()))?;
+            .map_err(|_| CandidateError::InvalidEndpoint(s.clone()))?;
         if addr.port() == 0 {
-            return Err(CandidateError::PortZero(s.to_string()));
+            return Err(CandidateError::PortZero(s.clone()));
         }
         seen.insert(WorkerKey(addr));
     }

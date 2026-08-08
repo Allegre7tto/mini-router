@@ -9,6 +9,7 @@ use axum::{
     routing::{get, post},
 };
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 pub struct AdapterState {
     pub config: AdapterConfig,
@@ -36,14 +37,17 @@ async fn chat(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, StatusCode> {
-    let auth = state.config.workload_token.as_str();
-    let header_auth = headers
+    let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-
-    use subtle::ConstantTimeEq;
-    if auth.as_bytes().ct_ne(header_auth.as_bytes()).into() {
+    if state
+        .config
+        .workload_token
+        .as_bytes()
+        .ct_ne(auth.as_bytes())
+        .into()
+    {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -51,41 +55,37 @@ async fn chat(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let has_envelope = body
+    let upstream = if body
         .windows(b"\"mini_router\"".len())
-        .any(|w| w == b"\"mini_router\"");
-
-    let upstream_body = if has_envelope {
+        .any(|w| w == b"\"mini_router\"")
+    {
         transform(&body, state.config.max_token_count).map_err(|_| StatusCode::BAD_REQUEST)?
     } else {
-        let mut b: serde_json::Value =
+        let mut body: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-        if let Some(obj) = b.as_object_mut() {
+        if let Some(obj) = body.as_object_mut() {
             obj.remove("mini_router");
             obj.remove("kv_transfer_params");
         }
-        b
+        body
     };
 
     let resp = state
         .client
         .post(format!("{}/v1/chat/completions", state.config.vllm_url))
-        .json(&upstream_body)
+        .json(&upstream)
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-    let status = resp.status();
     let headers = resp.headers().clone();
-    let stream = resp.bytes_stream();
-
-    let body = Body::from_stream(stream);
-
-    let mut response = Response::builder().status(status);
-    for (k, v) in headers.iter() {
+    let mut builder = Response::builder().status(resp.status());
+    for (k, v) in &headers {
         if k != "transfer-encoding" && k != "connection" {
-            response = response.header(k, v);
+            builder = builder.header(k, v);
         }
     }
-    Ok(response.body(body).unwrap())
+    Ok(builder
+        .body(Body::from_stream(resp.bytes_stream()))
+        .unwrap())
 }

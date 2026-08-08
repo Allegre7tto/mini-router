@@ -18,51 +18,47 @@ pub enum RequestError {
 }
 
 #[derive(Deserialize)]
-struct Chat {
-    model: String,
-    messages: Vec<Message>,
+struct Chat<'a> {
+    model: &'a str,
+    messages: Vec<Message<'a>>,
 }
 
 #[derive(Deserialize)]
-struct Message {
-    role: String,
+struct Message<'a> {
+    role: &'a str,
     #[allow(dead_code)]
-    content: String,
+    content: &'a str,
 }
 
 pub fn validate(
     body: &serde_json::Value,
     config: &RouterConfig,
 ) -> Result<serde_json::Value, RequestError> {
-    let body_bytes = serde_json::to_vec(body).map_err(|_| RequestError::Serialize)?;
-    if body_bytes.len() > config.max_body_bytes {
+    if serde_json::to_vec(body)
+        .map_err(|_| RequestError::Serialize)?
+        .len()
+        > config.max_body_bytes
+    {
         return Err(RequestError::BodyTooLarge);
     }
 
-    let chat: Chat =
-        serde_json::from_value(body.clone()).map_err(|_| RequestError::InvalidContent)?;
-
+    let chat = Chat::deserialize(body).map_err(|_| RequestError::InvalidContent)?;
     if chat.model != config.model {
         return Err(RequestError::ModelMismatch);
     }
-
     if chat.messages.is_empty() {
         return Err(RequestError::EmptyMessages);
     }
-
     for msg in &chat.messages {
-        if !matches!(
-            msg.role.as_str(),
-            "system" | "user" | "assistant" | "developer"
-        ) {
-            return Err(RequestError::InvalidRole(msg.role.clone()));
+        if !matches!(msg.role, "system" | "user" | "assistant" | "developer") {
+            return Err(RequestError::InvalidRole(msg.role.into()));
         }
     }
 
-    let mut sanitized = body.clone();
-    if let Some(obj) = sanitized.as_object_mut() {
+    let mut body = body.clone();
+    if let Some(obj) = body.as_object_mut() {
         obj.remove("mini_router");
         obj.remove("kv_transfer_params");
     }
-    Ok(sanitized)
+    Ok(body)
 }

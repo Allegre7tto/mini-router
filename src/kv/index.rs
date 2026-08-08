@@ -2,12 +2,6 @@ use crate::kv::events::{BlockHash, CacheEvent, EventBatch};
 use crate::types::{CandidateSet, WorkerKey};
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Owner {
-    pub worker: WorkerKey,
-    pub generation: u64,
-}
-
 #[derive(Debug, Clone)]
 pub struct PrefixMatch {
     pub blocks: usize,
@@ -20,8 +14,14 @@ pub enum IndexError {
     UnknownParent,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Key {
+    group: u32,
+    hash: BlockHash,
+}
+
 #[derive(Debug, Clone)]
-struct BlockNode {
+struct Node {
     parent: Option<BlockHash>,
     tokens: Vec<u32>,
     owners: Vec<(WorkerKey, u64)>,
@@ -29,14 +29,8 @@ struct BlockNode {
 
 #[derive(Default)]
 pub struct PrefixIndex {
-    nodes: HashMap<BlockHashMapKey, BlockNode>,
-    reverse: HashMap<(WorkerKey, u64), Vec<BlockHashMapKey>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BlockHashMapKey {
-    group: u32,
-    hash: BlockHash,
+    nodes: HashMap<Key, Node>,
+    reverse: HashMap<(WorkerKey, u64), Vec<Key>>,
 }
 
 impl PrefixIndex {
@@ -58,62 +52,49 @@ impl PrefixIndex {
                     if *size == 0 {
                         continue;
                     }
-                    let group = *group;
                     for (i, hash) in hashes.iter().enumerate() {
-                        let key = BlockHashMapKey {
-                            group,
+                        let key = Key {
+                            group: *group,
                             hash: hash.clone(),
                         };
-                        let block_parent = if i == 0 {
+                        let parent = if i == 0 {
                             parent.clone()
                         } else {
-                            hashes.get(i.wrapping_sub(1)).cloned()
+                            Some(hashes[i - 1].clone())
                         };
+                        if let Some(p) = &parent
+                            && !self.nodes.contains_key(&Key {
+                                group: *group,
+                                hash: p.clone(),
+                            })
+                        {
+                            return Err(IndexError::UnknownParent);
+                        }
+
                         let start = i * size;
                         let end = usize::min(start + size, tokens.len());
-                        let block_tokens = tokens[start..end].to_vec();
-
-                        if i == 0 && parent.is_some() {
-                            let pkey = BlockHashMapKey {
-                                group,
-                                hash: parent.clone().unwrap(),
-                            };
-                            if !self.nodes.contains_key(&pkey) {
-                                return Err(IndexError::UnknownParent);
-                            }
-                        } else if i > 0 {
-                            let prev = hashes[i - 1].clone();
-                            let pkey = BlockHashMapKey { group, hash: prev };
-                            if !self.nodes.contains_key(&pkey) {
-                                return Err(IndexError::UnknownParent);
-                            }
-                        }
-
-                        let entry = self.nodes.entry(key.clone()).or_insert_with(|| BlockNode {
-                            parent: block_parent.clone(),
-                            tokens: block_tokens.clone(),
+                        let block = tokens[start..end].to_vec();
+                        let entry = self.nodes.entry(key.clone()).or_insert_with(|| Node {
+                            parent: parent.clone(),
+                            tokens: block.clone(),
                             owners: Vec::new(),
                         });
-                        entry.tokens = block_tokens;
-                        if i == 0 {
-                            entry.parent = parent.clone();
-                        }
+                        entry.tokens = block;
                         if i == 0 {
                             entry.parent = parent.clone();
                         }
 
-                        let owner_key = (worker.clone(), generation);
-                        if !entry.owners.contains(&owner_key) {
-                            entry.owners.push(owner_key.clone());
+                        let owner = (worker.clone(), generation);
+                        if !entry.owners.contains(&owner) {
+                            entry.owners.push(owner.clone());
+                            self.reverse.entry(owner).or_default().push(key);
                         }
-                        self.reverse.entry(owner_key).or_default().push(key);
                     }
                 }
                 CacheEvent::Removed { hashes, group } => {
-                    let group = *group;
                     for hash in hashes {
-                        let key = BlockHashMapKey {
-                            group,
+                        let key = Key {
+                            group: *group,
                             hash: hash.clone(),
                         };
                         if let Some(node) = self.nodes.get_mut(&key) {
@@ -123,8 +104,8 @@ impl PrefixIndex {
                                 self.nodes.remove(&key);
                             }
                         }
-                        if let Some(v) = self.reverse.get_mut(&(worker.clone(), generation)) {
-                            v.retain(|k| k != &key);
+                        if let Some(keys) = self.reverse.get_mut(&(worker.clone(), generation)) {
+                            keys.retain(|k| k != &key);
                         }
                     }
                 }
@@ -137,12 +118,11 @@ impl PrefixIndex {
     }
 
     pub fn clear(&mut self, worker: WorkerKey, generation: u64) {
-        let owner_key = (worker, generation);
-        if let Some(keys) = self.reverse.remove(&owner_key) {
+        let owner = (worker, generation);
+        if let Some(keys) = self.reverse.remove(&owner) {
             for key in &keys {
                 if let Some(node) = self.nodes.get_mut(key) {
-                    node.owners
-                        .retain(|(w, g)| w != &owner_key.0 || g != &owner_key.1);
+                    node.owners.retain(|(w, g)| w != &owner.0 || g != &owner.1);
                     if node.owners.is_empty() {
                         self.nodes.remove(key);
                     }
@@ -158,57 +138,41 @@ impl PrefixIndex {
         generations: &BTreeMap<WorkerKey, u64>,
     ) -> BTreeMap<WorkerKey, PrefixMatch> {
         let mut results = BTreeMap::new();
-
         for worker in &candidates.0 {
-            let epoch = match generations.get(worker) {
-                Some(g) => *g,
-                None => continue,
+            let Some(&epoch) = generations.get(worker) else {
+                continue;
             };
-
-            let mut matched_tokens = 0;
-            let mut matched_blocks = 0;
-            let mut current_hash: Option<BlockHash> = None;
-
+            let mut tokens = 0;
+            let mut blocks = 0;
+            let mut parent: Option<BlockHash> = None;
             loop {
                 let mut found = false;
                 for (key, node) in &self.nodes {
-                    if key.group != 0 {
+                    if key.group != 0
+                        || node.parent != parent
+                        || !node.owners.contains(&(worker.clone(), epoch))
+                    {
                         continue;
                     }
-                    if !node.owners.contains(&(worker.clone(), epoch)) {
-                        continue;
-                    }
-                    if node.parent != current_hash {
-                        continue;
-                    }
-                    let remaining = &token_ids[matched_tokens..];
-                    let node_tokens = &node.tokens;
-                    let cmp_len = usize::min(remaining.len(), node_tokens.len());
-                    if cmp_len == 0 {
+                    let rest = &token_ids[tokens..];
+                    let n = usize::min(rest.len(), node.tokens.len());
+                    if n == 0 {
                         break;
                     }
-                    if node_tokens[..cmp_len] == remaining[..cmp_len] {
-                        matched_tokens += cmp_len;
-                        matched_blocks += 1;
-                        current_hash = Some(key.hash.clone());
+                    if node.tokens[..n] == rest[..n] {
+                        tokens += n;
+                        blocks += 1;
+                        parent = Some(key.hash.clone());
                         found = true;
                         break;
                     }
                 }
-                if !found || matched_tokens >= token_ids.len() {
+                if !found || tokens >= token_ids.len() {
                     break;
                 }
             }
-
-            results.insert(
-                worker.clone(),
-                PrefixMatch {
-                    blocks: matched_blocks,
-                    tokens: matched_tokens,
-                },
-            );
+            results.insert(worker.clone(), PrefixMatch { blocks, tokens });
         }
-
         results
     }
 }

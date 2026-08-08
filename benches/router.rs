@@ -1,7 +1,8 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use router::kv::events::{BlockHash, CacheEvent, EventBatch};
 use router::kv::index::PrefixIndex;
 use router::types::WorkerKey;
+use std::hint::black_box;
 
 fn index_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("prefix-index");
