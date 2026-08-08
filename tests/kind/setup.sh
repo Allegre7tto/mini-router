@@ -15,10 +15,15 @@ echo "=== Installing Inference Extension CRDs ==="
 kubectl apply --server-side -k "https://github.com/kubernetes-sigs/gateway-api-inference-extension/config/crd?ref=v1.5.0"
 
 echo "=== Installing Envoy Gateway ==="
+helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm \
+    --version v1.8.0 \
+    --set crds.gatewayAPI.enabled=false \
+    --set crds.envoyGateway.enabled=true | kubectl apply --server-side -f -
 helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
     --version v1.8.0 \
     --namespace envoy-gateway-system \
-    --create-namespace
+    --create-namespace \
+    --set crds.enabled=false
 kubectl wait --for=condition=available deployment/envoy-gateway \
     -n envoy-gateway-system --timeout=180s
 
