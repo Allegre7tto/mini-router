@@ -2,16 +2,16 @@ use crate::config::RouterConfig;
 use crate::kv::index::PrefixIndex;
 use crate::kv::subscriber::{Event, Subscriber};
 use crate::routing::load::{LoadError, parse_metrics};
+use crate::telemetry::RouterMetrics;
 use crate::types::{CandidateSet, WorkerKey};
 use crate::workers::endpoint::{EndpointSnapshot, LoadSample, Trust};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const METRICS_PORT: u16 = 8000;
 const TOPIC: &str = "kv-events";
 
 #[derive(Debug)]
@@ -49,6 +49,7 @@ pub struct EndpointManager {
     sender: mpsc::Sender<(WorkerKey, Event)>,
     client: reqwest::Client,
     config: RouterConfig,
+    metrics: Arc<RouterMetrics>,
 }
 
 impl EndpointManager {
@@ -57,6 +58,7 @@ impl EndpointManager {
         config: RouterConfig,
         index: Arc<Mutex<PrefixIndex>>,
         sender: mpsc::Sender<(WorkerKey, Event)>,
+        metrics: Arc<RouterMetrics>,
     ) -> Self {
         EndpointManager {
             states: Mutex::new(HashMap::new()),
@@ -64,6 +66,7 @@ impl EndpointManager {
             sender,
             client,
             config,
+            metrics,
         }
     }
 
@@ -92,6 +95,7 @@ impl EndpointManager {
                 })
                 .last_seen = now;
         }
+        self.metrics.active_endpoints.set(states.len() as f64);
     }
 
     pub async fn handle(&self, worker: WorkerKey, event: Event) {
@@ -113,9 +117,11 @@ impl EndpointManager {
                 }
             }
             Event::Gap => {
+                self.metrics.event_gaps.inc();
                 state.trust = Trust::Untrusted;
             }
             Event::Replayed => {
+                self.metrics.event_replays.inc();
                 state.trust = Trust::Trusted;
             }
             Event::Reset => {
@@ -124,15 +130,35 @@ impl EndpointManager {
                 state.generation += 1;
                 state.trust = Trust::Warming;
             }
+            Event::Duplicate => {
+                self.metrics.event_duplicates.inc();
+            }
         }
+        self.metrics
+            .index_size
+            .set(self.index.lock().await.len() as f64);
     }
 
     pub async fn snapshots(&self, candidates: &CandidateSet) -> Vec<EndpointSnapshot> {
         let states = self.states.lock().await;
+        let now = Instant::now();
+        let age = Duration::from_secs(self.config.metrics_max_age_secs);
         candidates
             .0
             .iter()
-            .filter_map(|w| states.get(w).map(|s| s.snapshot()))
+            .filter_map(|w| {
+                states.get(w).map(|s| {
+                    let mut snap = s.snapshot();
+                    if snap
+                        .load
+                        .as_ref()
+                        .is_some_and(|load| now.duration_since(load.collected_at) >= age)
+                    {
+                        snap.load = None;
+                    }
+                    snap
+                })
+            })
             .collect()
     }
 
@@ -141,12 +167,19 @@ impl EndpointManager {
         if let Some(state) = states.get_mut(&worker) {
             state.reservations.insert(decision, expires);
         }
+        self.metrics.reservation_count.set(
+            states
+                .values()
+                .map(|state| state.reservations.len())
+                .sum::<usize>() as f64,
+        );
     }
 
     pub async fn complete(&self, decision: Uuid, served: WorkerKey) -> Completion {
         let mut states = self.states.lock().await;
         for state in states.values_mut() {
             if state.reservations.remove(&decision).is_some() {
+                self.metrics.reservation_count.dec();
                 return if state.key == served {
                     Completion::Released
                 } else {
@@ -172,14 +205,29 @@ impl EndpointManager {
             states.remove(&worker);
             self.index.lock().await.clear(worker, g);
         }
+        self.metrics.active_endpoints.set(states.len() as f64);
+        self.metrics.reservation_count.set(
+            states
+                .values()
+                .map(|state| state.reservations.len())
+                .sum::<usize>() as f64,
+        );
+        self.metrics
+            .index_size
+            .set(self.index.lock().await.len() as f64);
     }
 
-    pub async fn fetch_load(&self, worker: &WorkerKey) -> Result<LoadSample, LoadError> {
+    pub async fn load(&self, worker: &WorkerKey) -> Result<LoadSample, LoadError> {
         let text = self
             .client
-            .get(format!("http://{}:{METRICS_PORT}/metrics", worker.0.ip()))
+            .get(format!(
+                "http://{}/metrics",
+                worker.metrics(self.config.metrics_port)
+            ))
             .send()
             .await
+            .map_err(|e| LoadError::Http(e.to_string()))?
+            .error_for_status()
             .map_err(|e| LoadError::Http(e.to_string()))?
             .text()
             .await
@@ -193,12 +241,14 @@ impl EndpointManager {
         })
     }
 
-    pub async fn update_load(&self, worker: &WorkerKey, now: Instant) {
-        if let Ok(sample) = self.fetch_load(worker).await {
-            let mut states = self.states.lock().await;
-            if let Some(state) = states.get_mut(worker) {
-                state.last_load = Some(sample);
-                state.last_seen = now;
+    pub async fn refresh(&self) {
+        let workers: Vec<_> = self.states.lock().await.keys().cloned().collect();
+        for worker in workers {
+            if let Ok(sample) = self.load(&worker).await {
+                let mut states = self.states.lock().await;
+                if let Some(state) = states.get_mut(&worker) {
+                    state.last_load = Some(sample);
+                }
             }
         }
     }

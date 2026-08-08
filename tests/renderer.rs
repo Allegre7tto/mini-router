@@ -1,6 +1,7 @@
 use router::config::RouterConfig;
 use router::renderer::client::{HttpRenderer, RenderError, Renderer};
 use router::renderer::request::{RequestError, validate};
+use router::types::RendererIdentity;
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -131,6 +132,44 @@ async fn renderer_ready_checks_model() {
         .await;
 
     let renderer = HttpRenderer::new(server.uri(), std::time::Duration::from_secs(30), 128000);
-    let result = renderer.ready("fixed").await;
+    let result = renderer
+        .ready(&RendererIdentity {
+            model: "fixed".into(),
+            revision: "abc123".into(),
+            probe_digest: RouterConfig::fixture().probe_digest,
+        })
+        .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn renderer_ready_checks_identity() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"object":"list","data":[{"id":"fixed","root":"abc123","owned_by":""}]}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions/render"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"request_id":"r1","token_ids":[1,2,3,4],"sampling_params":{}}),
+        ))
+        .mount(&server)
+        .await;
+
+    let renderer = HttpRenderer::new(server.uri(), std::time::Duration::from_secs(30), 128000);
+    assert!(
+        renderer
+            .ready(&RendererIdentity {
+                model: "fixed".into(),
+                revision: "abc123".into(),
+                probe_digest: RouterConfig::fixture().probe_digest,
+            })
+            .await
+            .is_ok()
+    );
 }

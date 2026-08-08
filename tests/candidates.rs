@@ -79,7 +79,7 @@ fn picked_sets_header_and_metadata() {
         effective_load: 1.0,
         body: b"mutated-body".to_vec(),
     };
-    let resp = picked(&decision);
+    let resp = picked(&decision, "token");
     assert!(resp.dynamic_metadata.is_some());
     let meta = resp.dynamic_metadata.as_ref().unwrap();
     let lb_field = meta.fields.get("envoy.lb").unwrap();
@@ -104,6 +104,11 @@ fn picked_sets_header_and_metadata() {
                 let hm = cr.header_mutation.as_ref().unwrap();
                 let hdr = &hm.set_headers[0].header.as_ref().unwrap();
                 assert_eq!(hdr.key, "x-gateway-destination-endpoint");
+                assert_eq!(hm.set_headers.len(), 2);
+                assert_eq!(
+                    hm.set_headers[1].header.as_ref().unwrap().key,
+                    "x-mini-router-token"
+                );
                 let body_mut = cr.body_mutation.as_ref().unwrap();
                 match &body_mut.mutation {
                     Some(envoy_grpc_ext_proc::envoy::service::ext_proc::v3::body_mutation::Mutation::Body(b)) => {

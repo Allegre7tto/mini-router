@@ -3,12 +3,15 @@ use router::kv::events::{CacheEvent, EventBatch};
 use router::kv::index::PrefixIndex;
 use router::kv::subscriber::Event;
 use router::routing::load::parse_metrics;
+use router::telemetry::RouterMetrics;
 use router::types::WorkerKey;
 use router::workers::endpoint::Trust;
 use router::workers::manager::EndpointManager;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn make_manager(
     config: RouterConfig,
@@ -20,7 +23,13 @@ fn make_manager(
     let index = Arc::new(Mutex::new(PrefixIndex::default()));
     let (tx, rx) = mpsc::channel(16);
     (
-        EndpointManager::new(reqwest::Client::new(), config, index.clone(), tx),
+        EndpointManager::new(
+            reqwest::Client::new(),
+            config,
+            index.clone(),
+            tx,
+            Arc::new(RouterMetrics::new().unwrap()),
+        ),
         index,
         rx,
     )
@@ -40,10 +49,34 @@ vllm:kv_cache_usage_perc{model_name="fixed"} 0.5
 
 #[test]
 fn parse_empty_metrics() {
-    let m = parse_metrics("").unwrap();
-    assert_eq!(m.running, 0);
-    assert_eq!(m.waiting, 0);
-    assert_eq!(m.kv_usage, 0.0);
+    assert!(parse_metrics("").is_err());
+}
+
+#[tokio::test]
+async fn refreshes_load() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/metrics"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "vllm:num_requests_running{model_name=\"fixed\"} 2\n\
+             vllm:num_requests_waiting{model_name=\"fixed\"} 3\n\
+             vllm:kv_cache_usage_perc{model_name=\"fixed\"} 0.5\n",
+        ))
+        .mount(&server)
+        .await;
+
+    let mut config = RouterConfig::fixture();
+    config.metrics_port = server.address().port();
+    let (manager, _index, _rx) = make_manager(config);
+    let worker = WorkerKey(std::net::SocketAddr::new(server.address().ip(), 8200));
+    let cands = router::types::CandidateSet(BTreeSet::from([worker.clone()]));
+    manager.observe(&cands, std::time::Instant::now()).await;
+    manager.refresh().await;
+
+    let load = manager.snapshots(&cands).await[0].load.clone().unwrap();
+    assert_eq!(load.running, 2);
+    assert_eq!(load.waiting, 3);
+    assert_eq!(load.kv_usage, 0.5);
 }
 
 #[tokio::test]

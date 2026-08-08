@@ -1,5 +1,6 @@
 use router::adapter::proxy::{AdapterState, router};
 use router::config::AdapterConfig;
+use router::telemetry::AdapterMetrics;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -11,8 +12,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = AdapterConfig::fixture();
-    config.validate()?;
+    let config = AdapterConfig::env()?;
 
     let client = reqwest::Client::builder()
         .build()
@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AdapterState {
         config: config.clone(),
         client,
+        metrics: AdapterMetrics::new()?,
     });
     let app = router(state);
     let addr: SocketAddr = config.listen.parse()?;

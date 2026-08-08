@@ -17,21 +17,31 @@ pub const PICK_NAMESPACE: &str = "envoy.lb";
 pub const PICK_KEY: &str = "x-gateway-destination-endpoint";
 pub const SERVED_KEY: &str = "x-gateway-destination-endpoint-served";
 
-pub fn picked(decision: &RoutingDecision) -> ProcessingResponse {
+pub fn picked(decision: &RoutingDecision, token: &str) -> ProcessingResponse {
     let endpoint = decision.endpoint.to_string();
     ProcessingResponse {
         response: Some(Response::RequestBody(BodyResponse {
             response: Some(CommonResponse {
                 status: ResponseStatus::ContinueAndReplace as i32,
                 header_mutation: Some(HeaderMutation {
-                    set_headers: vec![HeaderValueOption {
-                        header: Some(HeaderValue {
-                            key: PICK_KEY.into(),
-                            value: endpoint.clone(),
-                            raw_value: vec![],
-                        }),
-                        ..Default::default()
-                    }],
+                    set_headers: vec![
+                        HeaderValueOption {
+                            header: Some(HeaderValue {
+                                key: PICK_KEY.into(),
+                                value: endpoint.clone(),
+                                raw_value: vec![],
+                            }),
+                            ..Default::default()
+                        },
+                        HeaderValueOption {
+                            header: Some(HeaderValue {
+                                key: "x-mini-router-token".into(),
+                                value: token.into(),
+                                raw_value: vec![],
+                            }),
+                            ..Default::default()
+                        },
+                    ],
                     ..Default::default()
                 }),
                 body_mutation: Some(BodyMutation {

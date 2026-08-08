@@ -30,10 +30,19 @@ struct Node {
 #[derive(Default)]
 pub struct PrefixIndex {
     nodes: HashMap<Key, Node>,
+    links: HashMap<(u32, Option<BlockHash>), Vec<BlockHash>>,
     reverse: HashMap<(WorkerKey, u64), Vec<Key>>,
 }
 
 impl PrefixIndex {
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     pub fn apply(
         &mut self,
         worker: WorkerKey,
@@ -74,10 +83,16 @@ impl PrefixIndex {
                         let start = i * size;
                         let end = usize::min(start + size, tokens.len());
                         let block = tokens[start..end].to_vec();
-                        let entry = self.nodes.entry(key.clone()).or_insert_with(|| Node {
-                            parent: parent.clone(),
-                            tokens: block.clone(),
-                            owners: Vec::new(),
+                        let entry = self.nodes.entry(key.clone()).or_insert_with(|| {
+                            self.links
+                                .entry((*group, parent.clone()))
+                                .or_default()
+                                .push(hash.clone());
+                            Node {
+                                parent: parent.clone(),
+                                tokens: block.clone(),
+                                owners: Vec::new(),
+                            }
                         });
                         entry.tokens = block;
                         if i == 0 {
@@ -101,6 +116,11 @@ impl PrefixIndex {
                             node.owners
                                 .retain(|(w, g)| w != &worker || g != &generation);
                             if node.owners.is_empty() {
+                                if let Some(hashes) =
+                                    self.links.get_mut(&(*group, node.parent.clone()))
+                                {
+                                    hashes.retain(|hash| hash != &key.hash);
+                                }
                                 self.nodes.remove(&key);
                             }
                         }
@@ -124,6 +144,10 @@ impl PrefixIndex {
                 if let Some(node) = self.nodes.get_mut(key) {
                     node.owners.retain(|(w, g)| w != &owner.0 || g != &owner.1);
                     if node.owners.is_empty() {
+                        if let Some(hashes) = self.links.get_mut(&(key.group, node.parent.clone()))
+                        {
+                            hashes.retain(|hash| hash != &key.hash);
+                        }
                         self.nodes.remove(key);
                     }
                 }
@@ -147,11 +171,17 @@ impl PrefixIndex {
             let mut parent: Option<BlockHash> = None;
             loop {
                 let mut found = false;
-                for (key, node) in &self.nodes {
-                    if key.group != 0
-                        || node.parent != parent
-                        || !node.owners.contains(&(worker.clone(), epoch))
-                    {
+                let Some(hashes) = self.links.get(&(0, parent.clone())) else {
+                    break;
+                };
+                for hash in hashes {
+                    let Some(node) = self.nodes.get(&Key {
+                        group: 0,
+                        hash: hash.clone(),
+                    }) else {
+                        continue;
+                    };
+                    if !node.owners.contains(&(worker.clone(), epoch)) {
                         continue;
                     }
                     let rest = &token_ids[tokens..];
@@ -162,7 +192,7 @@ impl PrefixIndex {
                     if node.tokens[..n] == rest[..n] {
                         tokens += n;
                         blocks += 1;
-                        parent = Some(key.hash.clone());
+                        parent = Some(hash.clone());
                         found = true;
                         break;
                     }

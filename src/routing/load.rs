@@ -26,9 +26,9 @@ pub fn parse_metrics(text: &str) -> Result<LoadMetrics, LoadError> {
         }
     }
     Ok(LoadMetrics {
-        running: running.unwrap_or(0.0) as u64,
-        waiting: waiting.unwrap_or(0.0) as u64,
-        kv_usage: kv_usage.unwrap_or(0.0),
+        running: running.ok_or_else(|| LoadError::Parse("missing running metric".into()))? as u64,
+        waiting: waiting.ok_or_else(|| LoadError::Parse("missing waiting metric".into()))? as u64,
+        kv_usage: kv_usage.ok_or_else(|| LoadError::Parse("missing kv metric".into()))?,
     })
 }
 

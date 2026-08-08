@@ -16,16 +16,26 @@ spec:
     spec:
       containers:
         - name: adapter
-          image: mini-router:test
-          command: ["vllm-token-in-adapter"]
+          image: mini-router-adapter:test
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8200
               name: adapter
           env:
             - name: RUST_LOG
               value: info
+            - name: WORKLOAD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: router
+                  key: token
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8200
         - name: vllm
           image: mini-router-mock:test
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
               name: http
@@ -37,3 +47,7 @@ spec:
             requests:
               cpu: 100m
               memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000

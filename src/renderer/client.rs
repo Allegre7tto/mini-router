@@ -1,6 +1,7 @@
-use crate::types::RenderedInput;
+use crate::types::{RenderedInput, RendererIdentity};
 use async_trait::async_trait;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,7 +38,7 @@ struct ModelEntry {
 #[async_trait]
 pub trait Renderer: Send + Sync {
     async fn render(&self, body: &serde_json::Value) -> Result<RenderedInput, RenderError>;
-    async fn ready(&self, model: &str) -> Result<(), RenderError>;
+    async fn ready(&self, identity: &RendererIdentity) -> Result<(), RenderError>;
 }
 
 pub struct HttpRenderer {
@@ -95,7 +96,7 @@ impl Renderer for HttpRenderer {
         })
     }
 
-    async fn ready(&self, model: &str) -> Result<(), RenderError> {
+    async fn ready(&self, identity: &RendererIdentity) -> Result<(), RenderError> {
         let models: ModelsResponse = self
             .client
             .get(format!("{}/v1/models", self.base_url))
@@ -106,8 +107,26 @@ impl Renderer for HttpRenderer {
             .await
             .map_err(|e| RenderError::Http(e.to_string()))?;
 
-        if !models.data.iter().any(|m| m.id == model) {
+        if !models
+            .data
+            .iter()
+            .any(|m| m.id == identity.model && m.root == identity.revision)
+        {
             return Err(RenderError::ModelNotFound);
+        }
+
+        let tokens = self
+            .render(&serde_json::json!({
+                "model": identity.model,
+                "messages": [{"role": "user", "content": "mini-router identity probe"}]
+            }))
+            .await?;
+        let mut hash = Sha256::new();
+        for token in tokens.token_ids.iter() {
+            hash.update(token.to_be_bytes());
+        }
+        if format!("sha256:{:x}", hash.finalize()) != identity.probe_digest {
+            return Err(RenderError::IdentityMismatch);
         }
         Ok(())
     }

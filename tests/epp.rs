@@ -8,6 +8,7 @@ use router::epp::server::EppServer;
 use router::kv::index::PrefixIndex;
 use router::renderer::client::Renderer;
 use router::routing::service::RoutingService;
+use router::telemetry::RouterMetrics;
 use router::workers::manager::EndpointManager;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -26,7 +27,10 @@ impl Renderer for FakeRenderer {
             token_ids: Arc::from([1u32, 2, 3].as_slice()),
         })
     }
-    async fn ready(&self, _model: &str) -> Result<(), router::renderer::client::RenderError> {
+    async fn ready(
+        &self,
+        _identity: &router::types::RendererIdentity,
+    ) -> Result<(), router::renderer::client::RenderError> {
         Ok(())
     }
 }
@@ -61,24 +65,33 @@ fn test_candidate_metadata() -> envoy_grpc_ext_proc::envoy::config::core::v3::Me
 async fn epp_request_headers_flow() {
     let config = RouterConfig::fixture();
     let client = reqwest::Client::new();
-    let renderer: Box<dyn Renderer> = Box::new(FakeRenderer);
+    let renderer: Arc<dyn Renderer> = Arc::new(FakeRenderer);
     let index = Arc::new(Mutex::new(PrefixIndex::default()));
     let (tx, _rx) = mpsc::channel(16);
+    let metrics = Arc::new(RouterMetrics::new().unwrap());
     let manager = Arc::new(EndpointManager::new(
         client,
         config.clone(),
         index.clone(),
         tx,
+        metrics.clone(),
     ));
-    let service = Arc::new(RoutingService::new(renderer, index, manager, config));
-    let epp = EppServer::new(service, 100000, 8);
+    let service = Arc::new(RoutingService::new(
+        renderer, index, manager, config, metrics,
+    ));
+    let epp = EppServer::new(service, 100000, 8, "token".into());
     let addr: std::net::SocketAddr = "[::1]:0".parse().unwrap();
     let svc = envoy_grpc_ext_proc::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessorServer::new(epp);
+    let (health, probe) = tonic_health::server::health_reporter();
+    health
+        .set_serving::<envoy_grpc_ext_proc::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessorServer<EppServer>>()
+        .await;
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let actual_addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
         Server::builder()
+            .add_service(probe)
             .add_service(svc)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
@@ -92,6 +105,29 @@ async fn epp_request_headers_flow() {
             .connect()
             .await
             .unwrap();
+    let mut check = tonic_health::pb::health_client::HealthClient::new(channel.clone());
+    assert_eq!(
+        check
+            .check(tonic::Request::new(tonic_health::pb::HealthCheckRequest {
+                service: "".into()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .status,
+        tonic_health::pb::health_check_response::ServingStatus::Serving as i32
+    );
+    assert_eq!(
+        check
+            .check(tonic::Request::new(tonic_health::pb::HealthCheckRequest {
+                service: "envoy.service.ext_proc.v3.ExternalProcessor".into()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .status,
+        tonic_health::pb::health_check_response::ServingStatus::Serving as i32
+    );
     let mut client = ExternalProcessorClient::new(channel);
 
     let metadata = test_candidate_metadata();
@@ -146,17 +182,21 @@ async fn epp_request_headers_flow() {
 async fn epp_missing_candidates_returns_503() {
     let config = RouterConfig::fixture();
     let client = reqwest::Client::new();
-    let renderer: Box<dyn Renderer> = Box::new(FakeRenderer);
+    let renderer: Arc<dyn Renderer> = Arc::new(FakeRenderer);
     let index = Arc::new(Mutex::new(PrefixIndex::default()));
     let (tx, _rx) = mpsc::channel(16);
+    let metrics = Arc::new(RouterMetrics::new().unwrap());
     let manager = Arc::new(EndpointManager::new(
         client,
         config.clone(),
         index.clone(),
         tx,
+        metrics.clone(),
     ));
-    let service = Arc::new(RoutingService::new(renderer, index, manager, config));
-    let epp = EppServer::new(service, 100000, 8);
+    let service = Arc::new(RoutingService::new(
+        renderer, index, manager, config, metrics,
+    ));
+    let epp = EppServer::new(service, 100000, 8, "token".into());
     let addr: std::net::SocketAddr = "[::1]:0".parse().unwrap();
     let svc = envoy_grpc_ext_proc::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessorServer::new(epp);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

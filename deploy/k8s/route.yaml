@@ -14,4 +14,4 @@ spec:
         - name: router
           port: 8200
           kind: InferencePool
-          group: inference.networking.x-k8s.io
+          group: inference.networking.k8s.io

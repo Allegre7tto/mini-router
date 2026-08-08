@@ -6,4 +6,6 @@ pub enum ConfigError {
     ZeroValue(String),
     #[error("negative weight: {0}")]
     NegativeWeight(String),
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
 }

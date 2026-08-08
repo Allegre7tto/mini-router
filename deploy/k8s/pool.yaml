@@ -1,11 +1,15 @@
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
 metadata:
   name: router
 spec:
-  targetPortNumber: 8200
   selector:
-    app: worker
-  extensionRef:
+    matchLabels:
+      app: worker
+  targetPorts:
+    - number: 8200
+  endpointPickerRef:
     name: router-epp
-    port: 9000
+    port:
+      number: 9000
+    failureMode: FailOpen

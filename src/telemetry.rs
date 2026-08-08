@@ -17,6 +17,17 @@ pub struct RouterMetrics {
     pub active_endpoints: Gauge,
 }
 
+pub struct AdapterMetrics {
+    registry: Registry,
+    pub requests: Counter,
+    pub tokenin: Counter,
+    pub fallback: Counter,
+    pub invalid: Counter,
+    pub errors: Counter,
+    pub latency: Histogram,
+    pub streams: Gauge,
+}
+
 impl RouterMetrics {
     pub fn new() -> Result<Self, prometheus::Error> {
         let registry = Registry::new();
@@ -79,6 +90,47 @@ impl RouterMetrics {
             index_size,
             reservation_count,
             active_endpoints,
+        })
+    }
+
+    pub fn encode(&self) -> Result<String, prometheus::Error> {
+        let mut buf = Vec::new();
+        TextEncoder::new().encode(&self.registry.gather(), &mut buf)?;
+        String::from_utf8(buf).map_err(|e| prometheus::Error::Msg(e.to_string()))
+    }
+}
+
+impl AdapterMetrics {
+    pub fn new() -> Result<Self, prometheus::Error> {
+        let registry = Registry::new();
+        let requests = Counter::new("adapter_requests_total", "Total adapter requests")?;
+        let tokenin = Counter::new("adapter_tokenin_total", "Token-in requests")?;
+        let fallback = Counter::new("adapter_fallback_total", "Raw fallback requests")?;
+        let invalid = Counter::new("adapter_invalid_total", "Invalid requests")?;
+        let errors = Counter::new("adapter_upstream_errors_total", "Upstream errors")?;
+        let latency = Histogram::with_opts(HistogramOpts::new(
+            "adapter_upstream_latency_seconds",
+            "Upstream request latency",
+        ))?;
+        let streams = Gauge::new("adapter_active_streams", "Active response streams")?;
+
+        registry.register(Box::new(requests.clone()))?;
+        registry.register(Box::new(tokenin.clone()))?;
+        registry.register(Box::new(fallback.clone()))?;
+        registry.register(Box::new(invalid.clone()))?;
+        registry.register(Box::new(errors.clone()))?;
+        registry.register(Box::new(latency.clone()))?;
+        registry.register(Box::new(streams.clone()))?;
+
+        Ok(AdapterMetrics {
+            registry,
+            requests,
+            tokenin,
+            fallback,
+            invalid,
+            errors,
+            latency,
+            streams,
         })
     }
 

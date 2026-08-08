@@ -3,7 +3,6 @@ use crate::kv::index::PrefixMatch;
 use crate::types::{CandidateSet, WorkerKey};
 use crate::workers::endpoint::{EndpointSnapshot, Trust};
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +29,10 @@ pub fn choose(
     config: &RouterConfig,
 ) -> Result<ScoredEndpoint, RoutingError> {
     let snaps: BTreeMap<_, _> = snapshots.iter().map(|s| (&s.key, s)).collect();
+    let worst = snapshots
+        .iter()
+        .filter_map(|s| s.load.as_ref().map(|l| l.running + l.waiting))
+        .max();
 
     candidates
         .0
@@ -48,7 +51,7 @@ pub fn choose(
                 .load
                 .as_ref()
                 .map(|l| l.running + l.waiting)
-                .unwrap_or(0)
+                .unwrap_or_else(|| worst.map_or(0, |load| load + 1))
                 + snap.reservations as u64) as f64
                 / config.max_concurrency as f64;
             Some(ScoredEndpoint {
@@ -60,12 +63,9 @@ pub fn choose(
             })
         })
         .max_by(|a, b| {
-            a.score
-                .partial_cmp(&b.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| {
-                    tiebreak(request_id, &b.endpoint).cmp(&tiebreak(request_id, &a.endpoint))
-                })
+            a.score.total_cmp(&b.score).then_with(|| {
+                tiebreak(request_id, &b.endpoint).cmp(&tiebreak(request_id, &a.endpoint))
+            })
         })
         .ok_or(RoutingError::NoEligibleEndpoint)
 }

@@ -19,14 +19,21 @@ pub struct EppServer {
     service: Arc<RoutingService>,
     max_body_bytes: usize,
     max_candidates: usize,
+    token: String,
 }
 
 impl EppServer {
-    pub fn new(service: Arc<RoutingService>, max_body_bytes: usize, max_candidates: usize) -> Self {
+    pub fn new(
+        service: Arc<RoutingService>,
+        max_body_bytes: usize,
+        max_candidates: usize,
+        token: String,
+    ) -> Self {
         EppServer {
             service,
             max_body_bytes,
             max_candidates,
+            token,
         }
     }
 }
@@ -44,6 +51,7 @@ impl ExternalProcessor for EppServer {
         let service = self.service.clone();
         let max_body = self.max_body_bytes;
         let max_candidates = self.max_candidates;
+        let token = self.token.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
 
         tokio::spawn(async move {
@@ -81,7 +89,6 @@ impl ExternalProcessor for EppServer {
                             Ok(parsed) => candidates = Some(parsed),
                             Err(e) => {
                                 let _ = tx.send(Ok(response::unavailable(&e.to_string()))).await;
-                                let _ = tx.send(Err(Status::invalid_argument(e.to_string()))).await;
                                 return;
                             }
                         }
@@ -124,7 +131,7 @@ impl ExternalProcessor for EppServer {
                         match service.route(req).await {
                             Ok(d) => {
                                 decision = Some(d.decision_id);
-                                let _ = tx.send(Ok(response::picked(&d))).await;
+                                let _ = tx.send(Ok(response::picked(&d, &token))).await;
                             }
                             Err(e) => {
                                 let _ = tx.send(Ok(response::unavailable(&e.to_string()))).await;

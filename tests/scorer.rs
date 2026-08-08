@@ -112,3 +112,14 @@ fn candidate_boundary_respected() {
     let result = choose("req-1", 10, &candidates, &matches, &[a], &config).unwrap();
     assert_eq!(result.endpoint.to_string(), "10.0.0.1:8200");
 }
+
+#[test]
+fn missing_load_is_penalized() {
+    let config = RouterConfig::fixture();
+    let a = snap("10.0.0.1:8200", 2, 3, 1, Trust::Trusted);
+    let mut b = snap("10.0.0.2:8200", 0, 0, 1, Trust::Trusted);
+    b.load = None;
+    let candidates = cands(&["10.0.0.1:8200", "10.0.0.2:8200"]);
+    let result = choose("req-1", 10, &candidates, &BTreeMap::new(), &[a, b], &config).unwrap();
+    assert_eq!(result.endpoint.to_string(), "10.0.0.1:8200");
+}

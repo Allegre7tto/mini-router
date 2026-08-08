@@ -12,6 +12,7 @@ pub enum Event {
     Gap,
     Replayed,
     Reset,
+    Duplicate,
 }
 
 pub struct Subscriber {
@@ -96,6 +97,7 @@ impl Subscriber {
                 };
 
                 if batch.sequence < expected {
+                    let _ = sender.blocking_send((worker.clone(), Event::Duplicate));
                     continue;
                 }
 

@@ -16,3 +16,11 @@ jobs:
       - run: docker build -f docker/router/Dockerfile -t mini-router:test .
       - run: docker build -f docker/adapter/Dockerfile -t mini-router-adapter:test .
       - run: docker build -f docker/mock/Dockerfile -t mini-router-mock:test .
+      - uses: azure/setup-helm@v4.3.1
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: mini-router-test
+      - run: tests/kind/setup.sh
+      - run: tests/kind/verify.sh
+      - if: always()
+        run: tests/kind/teardown.sh

@@ -10,12 +10,13 @@ async fn main() -> anyhow::Result<()> {
 
     type Replay = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct MockState {
         load: Arc<Mutex<Load>>,
         chats: Arc<Mutex<Vec<serde_json::Value>>>,
         replay: Replay,
         seq: Arc<Mutex<u64>>,
+        publish: std::sync::mpsc::Sender<(u64, Vec<u8>)>,
     }
 
     #[derive(Clone, Default, serde::Deserialize)]
@@ -45,11 +46,19 @@ async fn main() -> anyhow::Result<()> {
         let mut seq = s.seq.lock().unwrap();
         let current = *seq;
         *seq += 1;
-        s.replay.lock().unwrap().push((current, buf));
+        s.replay.lock().unwrap().push((current, buf.clone()));
+        let _ = s.publish.send((current, buf));
         Json(serde_json::json!({ "sequence": current }))
     }
 
-    let state = MockState::default();
+    let (publish, events) = std::sync::mpsc::channel();
+    let state = MockState {
+        load: Arc::new(Mutex::new(Load::default())),
+        chats: Arc::new(Mutex::new(Vec::new())),
+        replay: Arc::new(Mutex::new(Vec::new())),
+        seq: Arc::new(Mutex::new(0)),
+        publish,
+    };
 
     let s = state.clone();
     std::thread::spawn(move || {
@@ -62,6 +71,10 @@ async fn main() -> anyhow::Result<()> {
         let empty: &[u8] = b"";
         let topic: &[u8] = b"kv-events";
         loop {
+            while let Ok((seq, payload)) = events.try_recv() {
+                let _ = pub_socket
+                    .send_multipart([topic, seq.to_be_bytes().as_slice(), payload.as_slice()], 0);
+            }
             if !router_socket.poll(zmq::POLLIN, 100).is_ok_and(|r| r > 0) {
                 continue;
             }
@@ -101,6 +114,15 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route(
+            "/v1/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "object": "list",
+                    "data": [{"id": "fixed", "root": "abc123", "owned_by": "mock"}]
+                }))
+            }),
+        )
         .route("/metrics", get({
             let s = state.clone();
             move || async move {
@@ -219,7 +241,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await?;
+    let listener = tokio::net::TcpListener::bind(
+        std::env::var("MOCK_LISTEN").unwrap_or_else(|_| "0.0.0.0:8000".into()),
+    )
+    .await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
