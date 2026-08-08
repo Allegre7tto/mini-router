@@ -1,6 +1,7 @@
 use crate::types::{CandidateSet, WorkerKey};
+use prost_types::Struct;
 use prost_types::value::Kind;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 
 pub const SUBSET_NAMESPACE: &str = "envoy.lb.subset_hint";
@@ -20,14 +21,13 @@ pub enum CandidateError {
     PortZero(String),
 }
 
-pub fn parse(metadata: &prost_types::Struct, limit: usize) -> Result<CandidateSet, CandidateError> {
-    let hint = metadata
-        .fields
+pub fn parse(
+    metadata: &HashMap<String, Struct>,
+    limit: usize,
+) -> Result<CandidateSet, CandidateError> {
+    let subset = metadata
         .get(SUBSET_NAMESPACE)
         .ok_or(CandidateError::MissingSubset)?;
-    let Some(Kind::StructValue(subset)) = &hint.kind else {
-        return Err(CandidateError::MissingSubset);
-    };
     let Some(Kind::ListValue(list)) = subset.fields.get(SUBSET_KEY).and_then(|v| v.kind.as_ref())
     else {
         return Err(CandidateError::EmptySubset);

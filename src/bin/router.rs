@@ -1,11 +1,14 @@
 use router::config::RouterConfig;
 use router::epp::server::EppServer;
 use router::kv::index::PrefixIndex;
+use router::kv::subscriber::Event;
 use router::renderer::client::HttpRenderer;
 use router::routing::service::RoutingService;
+use router::types::WorkerKey;
 use router::workers::manager::EndpointManager;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, mpsc};
 use tonic::transport::Server;
 
 #[tokio::main]
@@ -21,13 +24,40 @@ async fn main() -> anyhow::Result<()> {
 
     let renderer = HttpRenderer::new(
         config.renderer_url.clone(),
-        std::time::Duration::from_secs_f64(config.renderer_timeout_secs),
+        Duration::from_secs_f64(config.renderer_timeout_secs),
         config.max_token_count,
     );
 
-    let client = reqwest::Client::new();
+    let (tx, mut rx) = mpsc::channel::<(WorkerKey, Event)>(1024);
     let index = Arc::new(Mutex::new(PrefixIndex::default()));
-    let manager = Arc::new(EndpointManager::new(client, config.clone()));
+    let manager = Arc::new(EndpointManager::new(
+        reqwest::Client::new(),
+        config.clone(),
+        index.clone(),
+        tx,
+    ));
+
+    let consumer = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            while let Some((worker, event)) = rx.recv().await {
+                manager.handle(worker, event).await;
+            }
+        })
+    };
+
+    let janitor = {
+        let manager = manager.clone();
+        let interval = Duration::from_secs(config.metrics_interval_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            loop {
+                tick.tick().await;
+                manager.reap(Instant::now()).await;
+            }
+        })
+    };
+
     let service = Arc::new(RoutingService::new(
         Box::new(renderer),
         index,
@@ -41,7 +71,13 @@ async fn main() -> anyhow::Result<()> {
     let addr = config.epp_listen.parse()?;
     tracing::info!("EPP server listening on {addr}");
 
-    Server::builder().add_service(svc).serve(addr).await?;
-
+    let serve = Server::builder().add_service(svc).serve(addr);
+    if let Err(e) = serve.await {
+        consumer.abort();
+        janitor.abort();
+        return Err(e.into());
+    }
+    consumer.abort();
+    janitor.abort();
     Ok(())
 }

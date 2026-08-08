@@ -1,4 +1,4 @@
-use crate::epp::candidates::parse;
+use crate::epp::candidates::{CandidateError, parse};
 use crate::epp::response;
 use crate::routing::service::RoutingService;
 use crate::types::{CandidateSet, RoutingRequest};
@@ -73,18 +73,16 @@ impl ExternalProcessor for EppServer {
                                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
                         );
 
-                        if let Some(meta) = &msg.metadata_context
-                            && let Some(v) = meta.filter_metadata.values().next()
-                        {
-                            match parse(v, max_candidates) {
-                                Ok(parsed) => candidates = Some(parsed),
-                                Err(e) => {
-                                    let _ =
-                                        tx.send(Ok(response::unavailable(&e.to_string()))).await;
-                                    let _ =
-                                        tx.send(Err(Status::invalid_argument(e.to_string()))).await;
-                                    return;
-                                }
+                        let result = match &msg.metadata_context {
+                            Some(meta) => parse(&meta.filter_metadata, max_candidates),
+                            None => Err(CandidateError::MissingSubset),
+                        };
+                        match result {
+                            Ok(parsed) => candidates = Some(parsed),
+                            Err(e) => {
+                                let _ = tx.send(Ok(response::unavailable(&e.to_string()))).await;
+                                let _ = tx.send(Err(Status::invalid_argument(e.to_string()))).await;
+                                return;
                             }
                         }
 
@@ -135,8 +133,7 @@ impl ExternalProcessor for EppServer {
                     }
                     Some(Request::ResponseHeaders(_)) => {
                         if let Some(meta) = &msg.metadata_context
-                            && let Some(v) = meta.filter_metadata.values().next()
-                            && let Ok(Some(served)) = response::served(v)
+                            && let Ok(Some(served)) = response::served(&meta.filter_metadata)
                             && let Some(d) = decision
                         {
                             let _ = service.complete_served(d, served).await;

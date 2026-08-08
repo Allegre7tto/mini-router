@@ -1,13 +1,18 @@
 use crate::config::RouterConfig;
+use crate::kv::index::PrefixIndex;
+use crate::kv::subscriber::{Event, Subscriber};
 use crate::routing::load::{LoadError, parse_metrics};
 use crate::types::{CandidateSet, WorkerKey};
 use crate::workers::endpoint::{EndpointSnapshot, LoadSample, Trust};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const METRICS_PORT: u16 = 8000;
+const TOPIC: &str = "kv-events";
 
 #[derive(Debug)]
 pub enum Completion {
@@ -23,6 +28,7 @@ struct EndpointState {
     last_load: Option<LoadSample>,
     reservations: HashMap<Uuid, Instant>,
     last_seen: Instant,
+    cancel: CancellationToken,
 }
 
 impl EndpointState {
@@ -39,14 +45,23 @@ impl EndpointState {
 
 pub struct EndpointManager {
     states: Mutex<HashMap<WorkerKey, EndpointState>>,
+    index: Arc<Mutex<PrefixIndex>>,
+    sender: mpsc::Sender<(WorkerKey, Event)>,
     client: reqwest::Client,
     config: RouterConfig,
 }
 
 impl EndpointManager {
-    pub fn new(client: reqwest::Client, config: RouterConfig) -> Self {
+    pub fn new(
+        client: reqwest::Client,
+        config: RouterConfig,
+        index: Arc<Mutex<PrefixIndex>>,
+        sender: mpsc::Sender<(WorkerKey, Event)>,
+    ) -> Self {
         EndpointManager {
             states: Mutex::new(HashMap::new()),
+            index,
+            sender,
             client,
             config,
         }
@@ -57,15 +72,58 @@ impl EndpointManager {
         for worker in &candidates.0 {
             states
                 .entry(worker.clone())
-                .or_insert_with(|| EndpointState {
-                    key: worker.clone(),
-                    generation: 1,
-                    trust: Trust::Warming,
-                    last_load: None,
-                    reservations: HashMap::new(),
-                    last_seen: now,
+                .or_insert_with(|| {
+                    let cancel = CancellationToken::new();
+                    Subscriber::new(worker.clone(), TOPIC.into()).run(
+                        self.config.kv_event_port,
+                        self.config.kv_replay_port,
+                        self.sender.clone(),
+                        cancel.clone(),
+                    );
+                    EndpointState {
+                        key: worker.clone(),
+                        generation: 1,
+                        trust: Trust::Warming,
+                        last_load: None,
+                        reservations: HashMap::new(),
+                        last_seen: now,
+                        cancel,
+                    }
                 })
                 .last_seen = now;
+        }
+    }
+
+    pub async fn handle(&self, worker: WorkerKey, event: Event) {
+        let mut states = self.states.lock().await;
+        let Some(state) = states.get_mut(&worker) else {
+            return;
+        };
+        match event {
+            Event::Batch(batch) => {
+                let g = state.generation;
+                let applied = self
+                    .index
+                    .lock()
+                    .await
+                    .apply(worker.clone(), g, &batch)
+                    .is_ok();
+                if applied && state.trust == Trust::Warming {
+                    state.trust = Trust::Trusted;
+                }
+            }
+            Event::Gap => {
+                state.trust = Trust::Untrusted;
+            }
+            Event::Replayed => {
+                state.trust = Trust::Trusted;
+            }
+            Event::Reset => {
+                let g = state.generation;
+                self.index.lock().await.clear(worker.clone(), g);
+                state.generation += 1;
+                state.trust = Trust::Warming;
+            }
         }
     }
 
@@ -101,12 +159,19 @@ impl EndpointManager {
 
     pub async fn reap(&self, now: Instant) {
         let mut states = self.states.lock().await;
+        let mut stale = Vec::new();
         for state in states.values_mut() {
             state.reservations.retain(|_, expires| *expires > now);
+            if now.duration_since(state.last_seen).as_secs() >= self.config.endpoint_state_ttl_secs
+            {
+                stale.push((state.key.clone(), state.generation));
+                state.cancel.cancel();
+            }
         }
-        states.retain(|_, state| {
-            now.duration_since(state.last_seen).as_secs() < self.config.endpoint_state_ttl_secs
-        });
+        for (worker, g) in stale {
+            states.remove(&worker);
+            self.index.lock().await.clear(worker, g);
+        }
     }
 
     pub async fn fetch_load(&self, worker: &WorkerKey) -> Result<LoadSample, LoadError> {

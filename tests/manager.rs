@@ -1,8 +1,30 @@
 use router::config::RouterConfig;
+use router::kv::events::{CacheEvent, EventBatch};
+use router::kv::index::PrefixIndex;
+use router::kv::subscriber::Event;
 use router::routing::load::parse_metrics;
 use router::types::WorkerKey;
 use router::workers::endpoint::Trust;
+use router::workers::manager::EndpointManager;
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
+
+fn make_manager(
+    config: RouterConfig,
+) -> (
+    EndpointManager,
+    Arc<Mutex<PrefixIndex>>,
+    mpsc::Receiver<(WorkerKey, Event)>,
+) {
+    let index = Arc::new(Mutex::new(PrefixIndex::default()));
+    let (tx, rx) = mpsc::channel(16);
+    (
+        EndpointManager::new(reqwest::Client::new(), config, index.clone(), tx),
+        index,
+        rx,
+    )
+}
 
 #[test]
 fn parse_prometheus_load() {
@@ -27,8 +49,7 @@ fn parse_empty_metrics() {
 #[tokio::test]
 async fn lifecycle_observes_candidates() {
     let config = RouterConfig::fixture();
-    let client = reqwest::Client::new();
-    let manager = router::workers::manager::EndpointManager::new(client, config);
+    let (manager, _index, _rx) = make_manager(config);
     let w1: WorkerKey = "10.0.0.1:8200".parse().unwrap();
     let w2: WorkerKey = "10.0.0.2:8200".parse().unwrap();
     let set = BTreeSet::from([w1.clone(), w2.clone()]);
@@ -46,8 +67,7 @@ async fn lifecycle_observes_candidates() {
 #[tokio::test]
 async fn reservation_and_release() {
     let config = RouterConfig::fixture();
-    let client = reqwest::Client::new();
-    let manager = router::workers::manager::EndpointManager::new(client, config);
+    let (manager, _index, _rx) = make_manager(config);
     let w1: WorkerKey = "10.0.0.1:8200".parse().unwrap();
     let set = BTreeSet::from([w1.clone()]);
     let cands = router::types::CandidateSet(set);
@@ -74,8 +94,7 @@ async fn reservation_and_release() {
 #[tokio::test]
 async fn reservation_expires() {
     let config = RouterConfig::fixture();
-    let client = reqwest::Client::new();
-    let manager = router::workers::manager::EndpointManager::new(client, config);
+    let (manager, _index, _rx) = make_manager(config);
     let w1: WorkerKey = "10.0.0.1:8200".parse().unwrap();
     let set = BTreeSet::from([w1.clone()]);
     let cands = router::types::CandidateSet(set);
@@ -95,8 +114,7 @@ async fn reservation_expires() {
 #[tokio::test]
 async fn served_mismatch() {
     let config = RouterConfig::fixture();
-    let client = reqwest::Client::new();
-    let manager = router::workers::manager::EndpointManager::new(client, config);
+    let (manager, _index, _rx) = make_manager(config);
     let w1: WorkerKey = "10.0.0.1:8200".parse().unwrap();
     let w2: WorkerKey = "10.0.0.2:8200".parse().unwrap();
     let set = BTreeSet::from([w1.clone(), w2.clone()]);
@@ -117,8 +135,7 @@ async fn served_mismatch() {
 async fn ttl_cleanup() {
     let mut config = RouterConfig::fixture();
     config.endpoint_state_ttl_secs = 0;
-    let client = reqwest::Client::new();
-    let manager = router::workers::manager::EndpointManager::new(client, config);
+    let (manager, _index, _rx) = make_manager(config);
     let w1: WorkerKey = "10.0.0.1:8200".parse().unwrap();
     let set = BTreeSet::from([w1.clone()]);
     let cands = router::types::CandidateSet(set);
@@ -130,4 +147,40 @@ async fn ttl_cleanup() {
 
     let snaps = manager.snapshots(&empty).await;
     assert_eq!(snaps.len(), 0);
+}
+
+#[tokio::test]
+async fn handle_trust_transitions() {
+    let config = RouterConfig::fixture();
+    let (manager, _index, _rx) = make_manager(config);
+    let w1: WorkerKey = "10.0.0.1:8200".parse().unwrap();
+    let set = BTreeSet::from([w1.clone()]);
+    let cands = router::types::CandidateSet(set);
+    let now = std::time::Instant::now();
+    manager.observe(&cands, now).await;
+
+    let batch = EventBatch {
+        ts: 1.0,
+        events: vec![CacheEvent::Cleared],
+        data_parallel_rank: None,
+    };
+    manager
+        .handle(w1.clone(), Event::Batch(batch.clone()))
+        .await;
+    let snap = manager.snapshots(&cands).await.remove(0);
+    assert_eq!(snap.trust, Trust::Trusted);
+    assert_eq!(snap.generation, 1);
+
+    manager.handle(w1.clone(), Event::Gap).await;
+    let snap = manager.snapshots(&cands).await.remove(0);
+    assert_eq!(snap.trust, Trust::Untrusted);
+
+    manager.handle(w1.clone(), Event::Replayed).await;
+    let snap = manager.snapshots(&cands).await.remove(0);
+    assert_eq!(snap.trust, Trust::Trusted);
+
+    manager.handle(w1.clone(), Event::Reset).await;
+    let snap = manager.snapshots(&cands).await.remove(0);
+    assert_eq!(snap.trust, Trust::Warming);
+    assert_eq!(snap.generation, 2);
 }

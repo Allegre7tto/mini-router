@@ -11,7 +11,7 @@ use envoy_grpc_ext_proc::envoy::service::ext_proc::v3::{
 use envoy_grpc_ext_proc::envoy::r#type::v3::{HttpStatus, StatusCode};
 use prost_types::value::Kind;
 use prost_types::{Struct, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub const PICK_NAMESPACE: &str = "envoy.lb";
 pub const PICK_KEY: &str = "x-gateway-destination-endpoint";
@@ -72,12 +72,8 @@ pub fn unavailable(message: &str) -> ProcessingResponse {
     }
 }
 
-pub fn served(metadata: &Struct) -> Result<Option<WorkerKey>, CandidateError> {
-    let Some(Kind::StructValue(lb)) = metadata
-        .fields
-        .get(PICK_NAMESPACE)
-        .and_then(|v| v.kind.as_ref())
-    else {
+pub fn served(metadata: &HashMap<String, Struct>) -> Result<Option<WorkerKey>, CandidateError> {
+    let Some(lb) = metadata.get(PICK_NAMESPACE) else {
         return Ok(None);
     };
     let Some(Kind::StringValue(endpoint)) = lb.fields.get(SERVED_KEY).and_then(|v| v.kind.as_ref())

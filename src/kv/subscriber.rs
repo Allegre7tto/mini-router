@@ -1,20 +1,18 @@
-use crate::kv::events::{SequencedBatch, decode};
+use crate::kv::events::{EventBatch, decode};
 use crate::types::WorkerKey;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, thiserror::Error)]
-pub enum SubscriberError {
-    #[error("zmq error: {0}")]
-    Zmq(#[from] zmq::Error),
-    #[error("decode error: {0}")]
-    Decode(#[from] super::events::DecodeError),
-    #[error("gap: expected {expected}, available {available}")]
-    Gap { expected: u64, available: u64 },
-}
-
 const POLL_TIMEOUT_MS: i64 = 1000;
 const REPLAY_TIMEOUT_MS: i32 = 5000;
+
+#[derive(Debug)]
+pub enum Event {
+    Batch(EventBatch),
+    Gap,
+    Replayed,
+    Reset,
+}
 
 pub struct Subscriber {
     endpoint: WorkerKey,
@@ -30,11 +28,12 @@ impl Subscriber {
         &self,
         kv_port: u16,
         replay_port: u16,
-        sender: mpsc::Sender<SequencedBatch>,
+        sender: mpsc::Sender<(WorkerKey, Event)>,
         cancel: CancellationToken,
     ) {
         let addr = self.endpoint.0.ip().to_string();
         let topic = self.topic.clone();
+        let worker = self.endpoint.clone();
 
         std::thread::spawn(move || {
             let ctx = zmq::Context::new();
@@ -101,40 +100,41 @@ impl Subscriber {
                 }
 
                 if batch.sequence > expected {
-                    let replay = zmq::Context::new();
-                    if let Ok(req) = replay.socket(zmq::REQ)
+                    let _ = sender.blocking_send((worker.clone(), Event::Gap));
+                    let mut synced = false;
+                    if let Ok(req) = ctx.socket(zmq::REQ)
                         && req.connect(&format!("tcp://{addr}:{replay_port}")).is_ok()
                         && req.set_rcvtimeo(REPLAY_TIMEOUT_MS).is_ok()
                         && req.set_sndtimeo(REPLAY_TIMEOUT_MS).is_ok()
+                        && req.send(expected.to_be_bytes().as_slice(), 0).is_ok()
                     {
-                        let _ = req.send(expected.to_be_bytes().as_slice(), 0);
                         while let Ok(frames) = req.recv_multipart(0) {
-                            if frames.len() < 4 {
+                            if frames.len() != 3 || frames[0].is_empty() {
                                 break;
                             }
-                            if frames.len() >= 5 && frames[2].is_empty() {
-                                if frames[3].len() >= 8
-                                    && i64::from_be_bytes(
-                                        frames[3][..8].try_into().unwrap_or([0; 8]),
-                                    ) == -1
-                                {
-                                    break;
-                                }
-                                continue;
+                            let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
+                            let Ok(replayed) = decode(&refs) else {
+                                break;
+                            };
+                            if replayed.sequence != expected {
+                                break;
                             }
-                            if frames.len() == 5 {
-                                let refs: Vec<&[u8]> = vec![&frames[2], &frames[3], &frames[4]];
-                                if let Ok(batch) = decode(&refs) {
-                                    let _ = sender.blocking_send(batch);
-                                }
-                            }
+                            let _ = sender
+                                .blocking_send((worker.clone(), Event::Batch(replayed.batch)));
+                            expected += 1;
                         }
+                        synced = expected == batch.sequence;
                     }
-                    continue;
+                    let event = if synced {
+                        Event::Replayed
+                    } else {
+                        Event::Reset
+                    };
+                    let _ = sender.blocking_send((worker.clone(), event));
                 }
 
-                let _ = sender.blocking_send(batch);
-                expected += 1;
+                let _ = sender.blocking_send((worker.clone(), Event::Batch(batch.batch)));
+                expected = batch.sequence + 1;
             }
         });
     }

@@ -11,7 +11,7 @@ use router::routing::service::RoutingService;
 use router::workers::manager::EndpointManager;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tonic::Request as TonicRequest;
 use tonic::transport::Server;
 
@@ -58,13 +58,18 @@ fn test_candidate_metadata() -> envoy_grpc_ext_proc::envoy::config::core::v3::Me
 }
 
 #[tokio::test]
-#[ignore]
 async fn epp_request_headers_flow() {
     let config = RouterConfig::fixture();
     let client = reqwest::Client::new();
     let renderer: Box<dyn Renderer> = Box::new(FakeRenderer);
     let index = Arc::new(Mutex::new(PrefixIndex::default()));
-    let manager = Arc::new(EndpointManager::new(client, config.clone()));
+    let (tx, _rx) = mpsc::channel(16);
+    let manager = Arc::new(EndpointManager::new(
+        client,
+        config.clone(),
+        index.clone(),
+        tx,
+    ));
     let service = Arc::new(RoutingService::new(renderer, index, manager, config));
     let epp = EppServer::new(service, 100000, 8);
     let addr: std::net::SocketAddr = "[::1]:0".parse().unwrap();
@@ -138,13 +143,18 @@ async fn epp_request_headers_flow() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn epp_missing_candidates_returns_503() {
     let config = RouterConfig::fixture();
     let client = reqwest::Client::new();
     let renderer: Box<dyn Renderer> = Box::new(FakeRenderer);
     let index = Arc::new(Mutex::new(PrefixIndex::default()));
-    let manager = Arc::new(EndpointManager::new(client, config.clone()));
+    let (tx, _rx) = mpsc::channel(16);
+    let manager = Arc::new(EndpointManager::new(
+        client,
+        config.clone(),
+        index.clone(),
+        tx,
+    ));
     let service = Arc::new(RoutingService::new(renderer, index, manager, config));
     let epp = EppServer::new(service, 100000, 8);
     let addr: std::net::SocketAddr = "[::1]:0".parse().unwrap();

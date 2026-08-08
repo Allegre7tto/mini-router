@@ -2,9 +2,9 @@ use prost_types::{ListValue, Struct, Value, value::Kind};
 use router::epp::candidates::{CandidateError, parse};
 use router::epp::response::{picked, served, unavailable};
 use router::types::RoutingDecision;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-fn metadata_subset(endpoints: &[&str]) -> Struct {
+fn metadata_subset(endpoints: &[&str]) -> HashMap<String, Struct> {
     let list = ListValue {
         values: endpoints
             .iter()
@@ -20,14 +20,12 @@ fn metadata_subset(endpoints: &[&str]) -> Struct {
             kind: Some(Kind::ListValue(list)),
         },
     );
-    let subset_hint = Value {
-        kind: Some(Kind::StructValue(Struct {
+    HashMap::from([(
+        "envoy.lb.subset_hint".to_string(),
+        Struct {
             fields: subset_fields,
-        })),
-    };
-    let mut fields = BTreeMap::new();
-    fields.insert("envoy.lb.subset_hint".to_string(), subset_hint);
-    Struct { fields }
+        },
+    )])
 }
 
 #[test]
@@ -39,10 +37,7 @@ fn parse_valid_candidates() {
 
 #[test]
 fn parse_missing_namespace() {
-    let s = Struct {
-        fields: BTreeMap::new(),
-    };
-    let result = parse(&s, 8);
+    let result = parse(&HashMap::new(), 8);
     assert!(matches!(result, Err(CandidateError::MissingSubset)));
 }
 
@@ -148,21 +143,13 @@ fn served_extracts_endpoint() {
             kind: Some(Kind::StringValue("10.0.0.5:8200".to_string())),
         },
     );
-    let lb_value = Value {
-        kind: Some(Kind::StructValue(Struct { fields: lb_fields })),
-    };
-    let mut fields = BTreeMap::new();
-    fields.insert("envoy.lb".to_string(), lb_value);
-    let meta = Struct { fields };
+    let meta = HashMap::from([("envoy.lb".to_string(), Struct { fields: lb_fields })]);
     let result = served(&meta).unwrap();
     assert_eq!(result.unwrap().to_string(), "10.0.0.5:8200");
 }
 
 #[test]
 fn served_missing_returns_none() {
-    let meta = Struct {
-        fields: BTreeMap::new(),
-    };
-    let result = served(&meta).unwrap();
+    let result = served(&HashMap::new()).unwrap();
     assert!(result.is_none());
 }

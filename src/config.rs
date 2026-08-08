@@ -18,6 +18,8 @@ pub struct RouterConfig {
     pub metrics_interval_secs: u64,
     pub endpoint_state_ttl_secs: u64,
     pub reservation_ttl_secs: u64,
+    pub kv_event_port: u16,
+    pub kv_replay_port: u16,
     pub epp_listen: String,
     pub metrics_listen: String,
 }
@@ -41,6 +43,8 @@ impl RouterConfig {
             metrics_interval_secs: 5,
             endpoint_state_ttl_secs: 120,
             reservation_ttl_secs: 10,
+            kv_event_port: 5557,
+            kv_replay_port: 5558,
             epp_listen: "0.0.0.0:9000".into(),
             metrics_listen: "0.0.0.0:9001".into(),
         }
@@ -85,6 +89,12 @@ impl RouterConfig {
         }
         if self.reservation_ttl_secs == 0 {
             return Err(ConfigError::ZeroValue("reservation_ttl_secs".into()));
+        }
+        if self.kv_event_port == 0 {
+            return Err(ConfigError::ZeroValue("kv_event_port".into()));
+        }
+        if self.kv_replay_port == 0 {
+            return Err(ConfigError::ZeroValue("kv_replay_port".into()));
         }
         Ok(())
     }
