@@ -2675,6 +2675,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "transfer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "subtle",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

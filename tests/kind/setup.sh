@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-CLUSTER="${CLUSTER:-mini-router-test}"
+cluster="${CLUSTER:-mini-router-test}"
 
-if ! kind get clusters | grep -qx "$CLUSTER"; then
-    echo "=== Creating kind cluster: $CLUSTER ==="
-    kind create cluster --name "$CLUSTER" --wait 120s
+if ! kind get clusters | grep -qx "$cluster"; then
+    echo "=== Creating kind cluster: $cluster ==="
+    kind create cluster --name "$cluster" --wait 120s
 fi
 
 echo "=== Installing Gateway API CRDs ==="
@@ -19,18 +19,19 @@ helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm \
     --version v1.8.0 \
     --set crds.gatewayAPI.enabled=false \
     --set crds.envoyGateway.enabled=true | kubectl apply --server-side -f -
+# CRDs are already installed; do not reinstall the chart's bundled copies.
 helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
     --version v1.8.0 \
     --namespace envoy-gateway-system \
     --create-namespace \
-    --set crds.enabled=false
+    --skip-crds
 kubectl wait --for=condition=available deployment/envoy-gateway \
     -n envoy-gateway-system --timeout=180s
 
 echo "=== Loading images ==="
-kind load docker-image mini-router:test --name "$CLUSTER"
-kind load docker-image mini-router-adapter:test --name "$CLUSTER"
-kind load docker-image mini-router-mock:test --name "$CLUSTER"
+kind load docker-image mini-router:test --name "$cluster"
+kind load docker-image mini-router-adapter:test --name "$cluster"
+kind load docker-image mini-router-mock:test --name "$cluster"
 
 echo "=== Applying manifests ==="
 kubectl create namespace mini-router --dry-run=client -o yaml | kubectl apply -f -

@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends g++ && rm -rf /
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
+COPY transfer ./transfer
 RUN cargo build --release --bins --all-features
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*

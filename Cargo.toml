@@ -1,3 +1,6 @@
+[workspace]
+members = ["transfer"]
+
 [package]
 name = "router"
 version = "0.1.0"

@@ -9,10 +9,10 @@ jobs:
         with:
           toolchain: "1.94"
           components: clippy, rustfmt
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
-      - run: cargo build --release --bins --all-features
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo build --workspace --release --bins --all-features
       - run: docker build -f docker/router/Dockerfile -t mini-router:test .
       - run: docker build -f docker/adapter/Dockerfile -t mini-router-adapter:test .
       - run: docker build -f docker/mock/Dockerfile -t mini-router-mock:test .

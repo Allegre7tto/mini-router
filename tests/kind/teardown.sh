@@ -1,5 +1,5 @@
 #!/bin/bash
 set -euo pipefail
-CLUSTER="${CLUSTER:-mini-router-test}"
-kind delete cluster --name "$CLUSTER"
+cluster="${CLUSTER:-mini-router-test}"
+kind delete cluster --name "$cluster"
 echo "=== Teardown complete ==="
