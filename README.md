@@ -17,5 +17,3 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
-
-GPU staging is planned; see [Operator.md](docs/specs/Operator.md).

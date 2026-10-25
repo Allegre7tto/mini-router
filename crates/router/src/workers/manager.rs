@@ -190,6 +190,16 @@ impl EndpointManager {
         Completion::Unknown
     }
 
+    pub async fn release(&self, decision: Uuid) {
+        let mut states = self.states.lock().await;
+        for state in states.values_mut() {
+            if state.reservations.remove(&decision).is_some() {
+                self.metrics.reservation_count.dec();
+                break;
+            }
+        }
+    }
+
     pub async fn reap(&self, now: Instant) {
         let mut states = self.states.lock().await;
         let mut stale = Vec::new();

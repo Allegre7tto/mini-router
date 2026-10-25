@@ -9,9 +9,11 @@ pub const SUBSET_KEY: &str = "x-gateway-destination-endpoint-subset";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CandidateError {
+    #[error("InferencePool discovery is not synchronized")]
+    DiscoveryUnavailable,
     #[error("missing envoy.lb.subset_hint in metadata")]
     MissingSubset,
-    #[error("empty or missing x-gateway-destination-endpoint-subset")]
+    #[error("no eligible candidates or empty endpoint subset")]
     EmptySubset,
     #[error("invalid endpoint: {0}")]
     InvalidEndpoint(String),
@@ -19,6 +21,19 @@ pub enum CandidateError {
     TooManyCandidates,
     #[error("port zero not allowed: {0}")]
     PortZero(String),
+}
+
+pub fn optional(
+    metadata: &HashMap<String, Struct>,
+    limit: usize,
+) -> Result<Option<CandidateSet>, CandidateError> {
+    if !metadata
+        .get(SUBSET_NAMESPACE)
+        .is_some_and(|value| value.fields.contains_key(SUBSET_KEY))
+    {
+        return Ok(None);
+    }
+    parse(metadata, limit).map(Some)
 }
 
 pub fn parse(

@@ -125,4 +125,8 @@ impl RoutingService {
     pub async fn complete_served(&self, decision: Uuid, served: WorkerKey) -> Completion {
         self.manager.complete(decision, served).await
     }
+
+    pub async fn release(&self, decision: Uuid) {
+        self.manager.release(decision).await;
+    }
 }

@@ -9,9 +9,11 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.8.9"
 bytes = "1"
-envoy-grpc-ext-proc = "0.1.2"
+extproc = { package = "envoy-grpc-ext-proc", version = "0.1.2" }
 futures-util = "0.3"
 http = "1"
+k8s-openapi = { version = "0.28", features = ["v1_35"] }
+kube = { version = "4.2", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
 prometheus = "0.14.0"
 prometheus-parse = "0.2.5"
 prost-types = "0.14"
@@ -27,7 +29,7 @@ thiserror = "2"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
-tonic = "0.14.6"
+tonic = { version = "0.14.6", features = ["tls-aws-lc"] }
 tonic-health = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -36,7 +38,8 @@ zmq = "0.10"
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["async_tokio"] }
-rmpv = "1.3"
+rcgen = "0.14"
+tempfile = "3"
 tower = "0.5"
 wiremock = "0.6"
 

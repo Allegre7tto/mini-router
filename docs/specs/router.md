@@ -6,11 +6,11 @@ Phase 3 的可选 GPU KV Staging 见 [Operator.md](Operator.md)。它只扩展�
 
 ## 1. 目标与边界
 
-Router 用 Rust 实现，只解决单模型文本推理的请求选路。它在 Gateway 给出的 candidate endpoint 中，选择期望 prefill 完成时间最短的 Worker。
+Router 用 Rust 实现，只解决单模型文本推理的请求选路。它从 InferencePool 发现的就绪 endpoint 中，选择期望 prefill 完成时间最短的 Worker；Gateway 可用 subset 进一步限制候选范围。
 
 Router 不传输、复制或持久化 KV Tensor，也不在本地复用、远程拉取和重新计算之间做决策。它选择的是 adapter endpoint，不是 [2part.md](2part.md) 里持有 block 并执行计算的 Worker。
 
-Router 不暴露客户端推理 API，不实现集群控制面，也不调用 Kubernetes API。多个副本各自维护本地状态，不跨副本同步。状态差异只影响命中收益，不影响推理正确性。
+Router 不暴露客户端推理 API，也不实现集群控制面。它只读监听 Kubernetes 中指定的 InferencePool 和同命名空间的 Pod，维护本地成员视图。多个副本各自维护状态，不跨副本同步。
 
 ## 2. 范围
 
@@ -19,7 +19,7 @@ Router 不暴露客户端推理 API，不实现集群控制面，也不调用 Ku
 - 一个固定模型，以及多个相同 revision 的 vLLM Worker。
 - text-only `/v1/chat/completions`，包括非流式和 streaming。
 - 作为内部 Endpoint Picker，遵循 Gateway API Inference Extension 的 Endpoint Picker Protocol。
-- 每次选路使用 Gateway 提供的 candidate endpoint subset。
+- EPP 根据 InferencePool selector 和 targetPorts 发现就绪 Pod；Gateway 提供 subset 时取交集。
 - 选路前只 render 一次。同一份 `token_ids` 同时用于 prefix 匹配和 vLLM 推理。
 - 消费 vLLM KV cache events，在内存中维护 endpoint cache view。
 - 一种正式策略：最短 prefill 完成时间。没有速率样本时，在最长命中中选最短队列。
@@ -27,7 +27,7 @@ Router 不暴露客户端推理 API，不实现集群控制面，也不调用 Ku
 
 ### 2.2 不包含
 
-- Kubernetes client、Informer、Controller、Operator、自定义 CRD 和 Leader Election。
+- Kubernetes 写操作、Controller、Operator、自定义 CRD 和 Leader Election。
 - Worker 自注册、Lease、分布式成员管理和 Router 状态复制。
 - 多模型、动态加载、多模态、LoRA、tool calling、reasoning parser 和 structured output。
 - `/v1/completions`、Responses API 和其他 OpenAI endpoint。
@@ -43,7 +43,7 @@ Router 不暴露客户端推理 API，不实现集群控制面，也不调用 Ku
 ```text
 Client -> Inference Gateway
               |  ext-proc/EPP
-              |  body + candidate endpoint subset
+              |  body + optional candidate subset
               v
            Router
               |-- Renderer sidecar -> token_ids
@@ -65,16 +65,16 @@ Client -> Inference Gateway
               `-- response ---> Gateway -> Client
 ```
 
-Kubernetes、InferencePool 和 Gateway 负责 membership、readiness、Pod 生命周期和扩缩容。这些状态不进入 Router。kind 测试也不得向 Router 注入专用的成员管理接口。
+Kubernetes 和 InferencePool 是成员信息的来源，负责 Pod 生命周期、readiness 和扩缩容。Router 只读监听并维护成员视图，不创建、修改或删除这些资源。kind 测试不得向 Router 注入专用的成员管理接口。
 
-Gateway 是外部依赖，也是唯一客户端入口。生产和 kind 使用同一类 Gateway；candidate 都来自 EPP request metadata。Gateway 负责：
+Gateway 是外部依赖，也是唯一客户端入口。生产和 kind 使用同一类 Gateway。Gateway 负责：
 
 - 暴露 `/v1/chat/completions`，以及鉴权、限流、TLS 和 body 大小限制。
-- 缓冲用于选路的 request body，并提供 `x-gateway-destination-endpoint-subset`。
+- 使用全双工 ext-proc 发送请求头和 body 分块，不等待 EPP 的请求头回复才发送 body；可通过 metadata 提供 `x-gateway-destination-endpoint-subset`。
 - 调用 Router，取得目标 endpoint 和 body mutation。
 - 把修改后的请求发到目标 adapter，再向客户端透传 vLLM 响应。
 
-Router 不持有客户端 streaming connection，也不代理生成响应。为符合 Endpoint Picker Protocol，ext-proc 可以在响应阶段接收 `x-gateway-destination-endpoint-served`，但 response body processing 必须关闭。
+Gateway 持有客户端 HTTP/SSE 连接。Router 的 EPP 使用 `FULL_DUPLEX_STREAMED`：收集完整 request body 后 render 和选路，先回复带目标地址及认证信息的 request headers，再分块返回改写后的 body。响应 body 分块通过 EPP 原样返回；Router 不解析或重组 JSON/SSE，也不缓冲完整生成结果。
 
 选路链路是：
 
@@ -94,17 +94,21 @@ vllm launch render <model> --host 127.0.0.1 --port 8100
 
 ### 4.1 请求级边界
 
-Gateway 在 ext-proc metadata 中提供：
+Router 通过 `POOL`（默认 `router`）和必填的 `NAMESPACE` 确定唯一的 InferencePool。仅选择匹配其 `selector.matchLabels`、处于 Running 且 Ready、未标记删除并具有有效主 Pod IP 的 Pod，端口来自 `targetPorts`。RBAC 限定在同一命名空间，只允许读取指定 Pool 和监听 Pod。
+
+两类资源完成初始同步后才能就绪。Pool 缺失或无效、监听失败或重新同步期间停止选路，不使用旧成员视图；请求 body 缓冲结束后再次检查候选，返回选路结果前再次确认目标仍在有效集合内。
+
+Gateway 可在 ext-proc metadata 的 `envoy.lb.subset_hint` 命名空间中提供：
 
 ```text
 x-gateway-destination-endpoint-subset
 ```
 
-Router 按 Gateway API Inference Extension 解析该字段。字段缺失、为空，或其中没有可选 endpoint 时，Router 返回不可选路。Gateway 按其部署策略 fail-open 或返回 503。
+该字段缺失时使用发现的全部就绪 endpoint；存在时只使用发现集合与 subset 的交集。显式空 subset、格式错误、交集为空或候选数量超限均返回 503，不回退到更大的集合。客户端 header 不得作为候选来源。
 
 选中的目标必须同时写入 `x-gateway-destination-endpoint` 和 Endpoint Picker Protocol 要求的 dynamic metadata，两处值必须一致。
 
-Router 只能选择当前 subset 中的 endpoint。本地仍有状态、但不在 subset 中的 endpoint 不得被选择。
+Router 只能选择当前有效 candidates 中的 endpoint。本地仍有 KV 状态、但已不在发现集合或请求 subset 中的 endpoint 不得被选择。
 
 ### 4.2 端口
 
@@ -118,7 +122,7 @@ KV events  tcp://<pod-ip>:5557
 KV replay  tcp://<pod-ip>:5558
 ```
 
-Router 用 candidate 的 host 和上述固定端口推导 metrics、event 和 replay 地址，不查询 Pod、Service 或 EndpointSlice。内部键是：
+Router 用 candidate 的 host 和上述固定端口推导 metrics、event 和 replay 地址；成员发现读取 InferencePool 和 Pod，不依赖 Service 或 EndpointSlice。内部键是：
 
 ```text
 WorkerKey = canonical(candidate endpoint)
@@ -126,7 +130,7 @@ WorkerKey = canonical(candidate endpoint)
 
 ### 4.3 懒加载与清理
 
-每次收到 candidate subset 时：
+每次根据成员视图和可选 subset 得到有效 candidates 时：
 
 ```text
 observe(candidates)
@@ -149,7 +153,7 @@ RoutingRequest
   request_id
   model
   openai_chat_body
-  candidate_endpoints[]
+  candidate_endpoints[]  # optional Gateway subset; EPP resolves membership
   received_at
 ```
 
@@ -228,7 +232,9 @@ adapter 用 backpressure 流转发响应，不缓冲完整生成结果，也不�
 x-gateway-destination-endpoint-served = <ip:port>
 ```
 
-Router 只用它提前释放对应 reservation，并记录选路结果。它不读取 response body。metadata 缺失时，reservation 在 `reservation_ttl` 后过期。
+该 metadata 存在时，Router 用它校验实际服务地址并提前释放对应 reservation。不能假定所有网关都会提供它；缺失时不伪造实际服务地址，也不依赖额外 xDS 补丁。
+
+没有 served metadata 时，第一个非空响应分块作为粗粒度 prefill 完成信号，释放本地 reservation。它不是精确的首 token 事件；例如 SSE role 分块可能先于实际生成。空响应结束、响应 trailers、连接关闭及协议错误也释放 reservation，TTL 仅作最后兜底。当前不跟踪 decode load，也不为了统计 usage 解析生成内容。
 
 ## 6. KV Index
 
@@ -274,7 +280,7 @@ Q_i = \frac{q_i}{r_i}, \qquad L_i = Q_i + \frac{n - h_i}{r_i}
 
 选择 \(L_i\) 最小的 endpoint。Router 不传输 KV，因此没有拉取项；拉取和重算的比较见 [2part.md](2part.md)。
 
-\(q_i\) 优先用 Worker 报告的排队 prefill token 数。没有这份新鲜样本时，\(q_i\) 只计本副本未过期 reservation 的未命中 token 数。请求个数不得换算成 token。每次选路按当时的 \(n - h_i\) 增加 reservation；收到 served metadata 时释放，否则在 `reservation_ttl` 后过期。reservation 不在副本之间同步。陈旧的 \(q_i\) 或 \(r_i\) 视为不存在。
+\(q_i\) 优先用 Worker 报告的排队 prefill token 数。没有这份新鲜样本时，\(q_i\) 只计本副本未过期 reservation 的未命中 token 数。请求个数不得换算成 token。每次选路按当时的 \(n - h_i\) 增加 reservation，按 5.5 节的响应生命周期释放；`reservation_ttl` 兜底。reservation 不在副本之间同步。陈旧的 \(q_i\) 或 \(r_i\) 视为不存在。
 
 若没有任何 endpoint 具有 \(r_i\)，则在 \(h_i\) 最大的 endpoint 中选择等待请求最少的。等待请求数只用于这次退让，不进入 \(L_i\)。
 
@@ -282,9 +288,11 @@ Q_i = \frac{q_i}{r_i}, \qquad L_i = Q_i + \frac{n - h_i}{r_i}
 
 | 故障 | 行为 |
 |---|---|
-| candidate subset 缺失或为空 | 返回不可选路；Gateway fail-open 或返回 503 |
-| Router 或 EPP 不可用 | Gateway fail-open；Worker 内 tokenize 一次 |
-| Renderer 失败 | Router 不产生 token IDs；Gateway 按其策略 fail-open |
+| candidate subset 缺失 | 使用 InferencePool 中发现的就绪 endpoint |
+| subset 显式为空、格式错误或交集为空 | 返回 503，不扩大候选范围 |
+| Pool 缺失、成员尚未同步或监听失败 | 停止选路，返回 503，重新同步 |
+| Router 或 EPP 不可用 | 当前部署 fail-close，不绕过选路和内部认证 |
+| Renderer 失败 | Router 不产生 token IDs，返回 503 |
 | Renderer identity 不匹配 | Router 不进入 ready |
 | endpoint 尚未预热 | \(h_i = 0\)；没有 \(r_i\) 时不参与完成时间比较 |
 | KV gap 可以 replay | \(h_i = 0\)，replay 后恢复命中 |
@@ -295,12 +303,12 @@ Q_i = \frac{q_i}{r_i}, \qquad L_i = Q_i + \frac{n - h_i}{r_i}
 | adapter 不可用 | 由 Gateway 已配置的重试或失败策略处理；Router 不接管响应 |
 | streaming 开始后失败 | 终止 stream，不透明重试 |
 
-正常路径和 fail-open 路径都最多 tokenize 一次。
+正常路径最多 tokenize 一次。只有补齐独立的受信 Gateway 身份校验后才能启用 raw fail-open；当前部署不启用。
 
 ## 9. 安全
 
 - Gateway 是唯一公网入口。Router、Renderer、adapter、vLLM、metrics 和 KV event 只暴露在内部网络。
-- Router 只接受 Gateway 给出的 candidate，不接受客户端自报的 endpoint。
+- Router 只接受 Kubernetes 发现的就绪成员；Gateway subset 只能缩小范围，不接受客户端自报的 endpoint。
 - Gateway 和 Router 必须删除客户端提供的 `mini_router`。
 - adapter 必须删除客户端提供的 vLLM token-in 字段；正常路径再写入 Router 的 token IDs。
 - 没有 envelope 的请求，只有通过 Gateway workload identity 校验后才能 raw fallback。
@@ -336,6 +344,16 @@ reservation_ttl
 - InferencePool 指向 adapter 的 8200 端口。
 - Gateway 调用 Router 的 EPP/ext-proc 端口。
 
+当前 kind 集成固定使用 Envoy Gateway v1.8.0 和 Envoy AI Gateway v0.6.0。AI Gateway 注册 InferencePool 后端、读取资源并通过 xDS hooks 创建 ORIGINAL_DST 和 EPP TLS 集群；HTTPRoute 始终引用 InferencePool，不替换为普通 Service。
+
+`router-epp` 使用普通 ClusterIP Service，且在 Gateway 之前创建。AI Gateway 通过 STRICT_DNS 连接它；headless Service 在 Pod 尚未 Ready 时可能没有地址，早期 DNS 无记录的负缓存会使 Envoy 在 Pod 就绪后仍报告 `no healthy upstream`。稳定的 Service IP 避免这类启动竞态，后端仍由 Kubernetes 只转发到就绪 EPP Pod，不绕过 InferencePool 选路。
+
+EPP 直接适配 AI Gateway 默认的双向全双工模式，不维护 EnvoyPatchPolicy，不依赖生成的 filter/cluster 名称。请求 body 在 EPP 内受大小限制地收集；headers、改写后的 request body、trailers 按协议顺序回复。body 使用 `StreamedBodyResponse`，每块不超过 62 KB；响应按字节原样分块转发，通过有界队列施加 backpressure。网关提供 ProtocolConfiguration 时，EPP 拒绝非全双工的 request/response body 模式。
+
+Router 的 `CERT` 和 `KEY` 必须成对设置，为 EPP 9000 端口启用 TLS；`HEALTH` 默认为 `0.0.0.0:9002`，提供独立的明文 gRPC kubelet probe。kind 在安装时生成短期自签名证书存入 Secret，AI Gateway 的 EPP 集群使用上游默认的跳过证书验证行为。这是测试接线，不等同于生产 mTLS；生产仍需满足上述 workload identity 要求。
+
+setup 等待 Gateway Programmed 和 HTTPRoute Accepted/ResolvedRefs；verify 分别测试普通响应和 SSE，检查实际 Worker 收到的 token IDs、内部 envelope 已移除及两份 Router 的 reservation 已释放。
+
 kind 测试使用真实 kubelet，不用只伪造 Node 或 Pod 对象的模拟器。测试包含与生产相同的 Gateway 和 InferencePool、Router、CPU-only Renderer，以及至少两个运行真实 adapter 的 Mock Worker。Mock upstream 提供 OpenAI HTTP、metrics、KV event 和 replay。集群外的测试驱动通过 Gateway 发请求。
 
 默认成功路径使用真实 Renderer 和固定的小型 text-only 模型。Renderer 超时和错误响应可以用确定性的 Mock Renderer。生产二进制没有静态 candidates 模式。纯 Rust 测试可以在内存中构造 `CandidateSet`；跨组件的 candidate 变化必须来自 Gateway 或 InferencePool。
@@ -352,7 +370,7 @@ crates/router/src/adapter/    vLLM token-in 字段和响应转发
 ```
 
 - `epp` 不实现 Gateway。
-- `workers` 只管理本进程状态，不查询 Kubernetes。
+- `workers` 只读发现 InferencePool/Pod，管理本进程的成员、KV 和负载状态，不执行 Kubernetes 写操作。
 - `kv` 不依赖 Gateway 或 Kubernetes 类型。
 - `routing` 接收 `token_ids`、`CandidateSet` 和状态快照，返回纯决策。
 - `adapter` 是唯一读写 vLLM 私有 token-in 字段的模块。
@@ -390,7 +408,7 @@ adapter 至少暴露：请求数、token-in 请求数、raw fallback 数、无�
 
 默认跨组件测试在临时 kind 集群中运行，使用真实 Gateway、InferencePool、Router、Renderer 和 adapter。只有需要 GPU 的 vLLM engine 由 Mock upstream 代替。必须覆盖：
 
-1. InferencePool 和 Gateway 把 candidate subset 交给 EPP。
+1. EPP 从 InferencePool 和就绪 Pod 发现 candidates；Gateway 不提供 subset 时仍能选路，提供时严格取交集。
 2. endpoint header 与 dynamic metadata 一致。
 3. EPP gRPC health 正确反映 liveness、readiness 和 service 状态。
 4. Gateway 应用 body mutation，请求到达选中的真实 adapter。
@@ -402,11 +420,11 @@ adapter 至少暴露：请求数、token-in 请求数、raw fallback 数、无�
 10. event 重复、gap、replay、断线重连和 generation 隔离。
 11. KV 状态失效时该 endpoint 的 \(h_i\) 为 0，选路不再使用失效前的命中。
 12. 非流式和 streaming 响应穿过 adapter 与 Gateway，且不被缓冲或重组。
-13. served metadata 提前释放 reservation；EPP 不读取 response body。
+13. EPP 按全双工协议返回响应分块；served metadata、首个非空响应分块、完成和断连触发 reservation 清理，不解析或重组生成内容。
 14. Router 不可用时 Gateway fail-open，Worker 路径只 tokenize 一次。
 15. 两个 Router 副本不共享状态，也能各自完成合法选路。
 
-测试不读取 Router 内部状态来伪造成员变化，也不授予 Router Kubernetes 权限。结束后销毁临时集群。
+跨组件测试通过修改 InferencePool 和真实 Pod 产生成员变化，不读取 Router 内部状态来伪造；Router 仅获得命名空间内的只读发现权限。结束后销毁临时集群。
 
 ### 13.3 GPU 验证
 
@@ -428,12 +446,12 @@ adapter 至少暴露：请求数、token-in 请求数、raw fallback 数、无�
 
 以下全部满足时，本规格交付完成：
 
-1. Gateway 把 text-only chat request 和 candidate subset 交给 Router。
+1. Gateway 把 text-only chat request 和可选 candidate subset 交给 Router；Router 从 InferencePool 发现就绪成员并确定有效 candidates。
 2. Router 只调用一次 Renderer，并用同一份 `token_ids` 做 prefix 匹配和 body mutation。
 3. adapter 把这份 token IDs 传给本机 vLLM，Worker 不重复 tokenize。
 4. Router 只在当前 candidates 内，按 \(L_i\) 选 endpoint；没有速率样本时，在最长命中中选最短队列。
 5. 非流式和 streaming 响应经 adapter 与 Gateway 透传。
-6. Router 不调用 Kubernetes API，也不在副本之间同步状态。
+6. Router 只读监听指定命名空间的 InferencePool 和 Pod，不执行 Kubernetes 写操作，也不在副本之间同步状态。
 7. Router 不传输 KV，也不产生 Fetch 或 Recompute 计划。
 8. `cargo test` 和默认 kind 集成测试通过。
 9. 发布前的 GPU 验证和 Benchmark 确认 vLLM 兼容性和路由收益。

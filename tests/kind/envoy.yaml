@@ -1,0 +1,27 @@
+# Envoy Gateway v1.8.0 with the AI Gateway v0.6.0 extension server.
+config:
+  envoyGateway:
+    extensionApis:
+      enableBackend: true
+    extensionManager:
+      failOpen: false
+      backendResources:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          version: v1
+      hooks:
+        xdsTranslator:
+          translation:
+            listener:
+              includeAll: true
+            route:
+              includeAll: true
+            cluster:
+              includeAll: true
+            secret:
+              includeAll: true
+          post: [Translation, Cluster, Route]
+      service:
+        fqdn:
+          hostname: ai-gateway-controller.envoy-ai-gateway-system.svc.cluster.local
+          port: 1063

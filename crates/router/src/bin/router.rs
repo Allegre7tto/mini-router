@@ -1,3 +1,4 @@
+use extproc::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessorServer;
 use router::config::RouterConfig;
 use router::epp::server::EppServer;
 use router::kv::index::PrefixIndex;
@@ -6,13 +7,14 @@ use router::renderer::client::{HttpRenderer, Renderer};
 use router::routing::service::RoutingService;
 use router::telemetry::RouterMetrics;
 use router::types::{RendererIdentity, WorkerKey};
+use router::workers::discovery::Discovery;
 use router::workers::manager::EndpointManager;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 
-type Processor = envoy_grpc_ext_proc::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessorServer<EppServer>;
+type Processor = ExternalProcessorServer<EppServer>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,6 +25,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = RouterConfig::env()?;
+    let client = kube::Client::try_default().await?;
+    let discovery = Arc::new(Discovery::default());
+    let membership = tokio::spawn({
+        let discovery = discovery.clone();
+        let namespace = config.namespace.clone();
+        let pool = config.pool.clone();
+        async move { discovery.run(client, &namespace, &pool).await }
+    });
 
     let renderer = Arc::new(HttpRenderer::new(
         config.renderer_url.clone(),
@@ -97,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         config.max_body_bytes,
         config.max_candidates,
         config.workload_token.clone(),
+        discovery.clone(),
     );
     let svc = Processor::new(epp);
     let (health, probe) = tonic_health::server::health_reporter();
@@ -109,10 +120,13 @@ async fn main() -> anyhow::Result<()> {
         };
         async move {
             loop {
-                if renderer.ready(&identity).await.is_ok() {
-                    health.set_serving::<Processor>().await;
-                } else {
-                    health.set_not_serving::<Processor>().await;
+                match renderer.ready(&identity).await {
+                    Ok(()) if discovery.ready() => health.set_serving::<Processor>().await,
+                    Ok(()) => health.set_not_serving::<Processor>().await,
+                    Err(error) => {
+                        tracing::warn!(%error, "renderer readiness check failed");
+                        health.set_not_serving::<Processor>().await;
+                    }
                 }
                 tokio::time::sleep(Duration::from_secs(config.metrics_interval_secs)).await;
             }
@@ -122,20 +136,24 @@ async fn main() -> anyhow::Result<()> {
     let addr = config.epp_listen.parse()?;
     tracing::info!("EPP server listening on {addr}");
 
-    let serve = Server::builder()
-        .add_service(probe)
+    let mut server = Server::builder();
+    if let (Some(cert), Some(key)) = (&config.cert, &config.key) {
+        let identity =
+            Identity::from_pem(tokio::fs::read(cert).await?, tokio::fs::read(key).await?);
+        server = server.tls_config(ServerTlsConfig::new().identity(identity))?;
+    }
+    let serve = server
+        .add_service(probe.clone())
         .add_service(svc)
         .serve(addr);
-    if let Err(e) = serve.await {
-        consumer.abort();
-        janitor.abort();
-        monitor.abort();
-        readiness.abort();
-        return Err(e.into());
+    // Kubelet gRPC probes require plaintext, separate from the TLS EPP listener.
+    let probes = Server::builder()
+        .add_service(probe)
+        .serve(config.health.parse()?);
+    let result = tokio::try_join!(serve, probes);
+    for task in [membership, consumer, janitor, monitor, readiness] {
+        task.abort();
     }
-    consumer.abort();
-    janitor.abort();
-    monitor.abort();
-    readiness.abort();
+    result?;
     Ok(())
 }

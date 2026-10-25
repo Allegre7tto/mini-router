@@ -2,6 +2,11 @@ use crate::error::ConfigError;
 
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
+    pub pool: String,
+    pub namespace: String,
+    pub cert: Option<String>,
+    pub key: Option<String>,
+    pub health: String,
     pub model: String,
     pub revision: String,
     pub probe_digest: String,
@@ -29,6 +34,11 @@ pub struct RouterConfig {
 impl RouterConfig {
     pub fn fixture() -> Self {
         RouterConfig {
+            pool: "router".into(),
+            namespace: "mini-router".into(),
+            cert: None,
+            key: None,
+            health: "0.0.0.0:9002".into(),
             model: "fixed".into(),
             revision: "abc123".into(),
             probe_digest: "sha256:bac02613b6f9456c3b486cbd9e93e575c8a054a7a6784af9e1669950bad5f6e2"
@@ -57,6 +67,12 @@ impl RouterConfig {
 
     pub fn env() -> Result<Self, ConfigError> {
         let config = RouterConfig {
+            pool: std::env::var("POOL").unwrap_or_else(|_| "router".into()),
+            namespace: std::env::var("NAMESPACE")
+                .map_err(|_| ConfigError::EmptyField("NAMESPACE".into()))?,
+            cert: std::env::var("CERT").ok(),
+            key: std::env::var("KEY").ok(),
+            health: std::env::var("HEALTH").unwrap_or_else(|_| "0.0.0.0:9002".into()),
             model: std::env::var("MODEL").unwrap_or_else(|_| "fixed".into()),
             revision: std::env::var("REVISION").unwrap_or_else(|_| "abc123".into()),
             probe_digest: std::env::var("PROBE_DIGEST").unwrap_or_else(|_| {
@@ -120,6 +136,23 @@ impl RouterConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.cert.is_some() != self.key.is_some()
+            || self.cert.as_ref().is_some_and(|value| value.is_empty())
+            || self.key.as_ref().is_some_and(|value| value.is_empty())
+        {
+            return Err(ConfigError::InvalidValue(
+                "CERT and KEY must be set together".into(),
+            ));
+        }
+        if self.health.parse::<std::net::SocketAddr>().is_err() {
+            return Err(ConfigError::InvalidValue("HEALTH".into()));
+        }
+        if self.pool.is_empty() {
+            return Err(ConfigError::EmptyField("pool".into()));
+        }
+        if self.namespace.is_empty() {
+            return Err(ConfigError::EmptyField("namespace".into()));
+        }
         if self.model.is_empty() {
             return Err(ConfigError::EmptyField("model".into()));
         }

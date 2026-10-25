@@ -1,6 +1,7 @@
 #[cfg(feature = "mock")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use axum::response::IntoResponse;
     use axum::{
         Json, Router,
         routing::{get, post},
@@ -147,10 +148,24 @@ async fn main() -> anyhow::Result<()> {
             move |Json(body): Json<serde_json::Value>| {
                 let s = s.clone();
                 async move {
+                    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
                     s.chats.lock().unwrap().push(body);
-                    Json(serde_json::json!({
-                        "choices": [{"message": {"role": "assistant", "content": "mock response"}}]
-                    }))
+                    let worker = std::env::var("HOSTNAME").unwrap_or_else(|_| "mock".into());
+                    let response = if stream {
+                        use axum::response::sse::{Event, Sse};
+                        let events = tokio_stream::iter([
+                            Ok::<_, std::convert::Infallible>(Event::default().json_data(serde_json::json!({
+                                "choices": [{"delta": {"content": "mock response"}}]
+                            })).unwrap()),
+                            Ok(Event::default().data("[DONE]")),
+                        ]);
+                        Sse::new(events).into_response()
+                    } else {
+                        Json(serde_json::json!({
+                            "choices": [{"message": {"role": "assistant", "content": "mock response"}}]
+                        })).into_response()
+                    };
+                    ([("x-mock-worker", worker)], response).into_response()
                 }
             }
         }))

@@ -56,7 +56,6 @@ pub struct RendererIdentity {
 #[derive(Debug, Clone)]
 pub struct RoutingRequest {
     pub request_id: String,
-    pub model: String,
     pub body: serde_json::Value,
     pub candidates: CandidateSet,
 }

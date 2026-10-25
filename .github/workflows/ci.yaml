@@ -18,9 +18,21 @@ jobs:
       - run: docker build -f docker/mock/Dockerfile -t mini-router-mock:test .
       - uses: azure/setup-helm@v4.3.1
       - uses: helm/kind-action@v1.12.0
+        id: kind
         with:
           cluster_name: mini-router-test
       - run: tests/kind/setup.sh
       - run: tests/kind/verify.sh
-      - if: always()
+      - name: Diagnose cluster failure
+        if: failure() && steps.kind.outcome == 'success'
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get gateway,httproute,inferencepool -n mini-router -o yaml || true
+          kubectl get service,endpointslice -n mini-router -o wide || true
+          kubectl logs -n envoy-ai-gateway-system deployment/ai-gateway-controller --tail=60 || true
+          kubectl logs -n envoy-gateway-system deployment/envoy-gateway --tail=60 || true
+          kubectl logs -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name=envoy-gateway --all-containers --prefix --tail=60 || true
+          kubectl logs -n mini-router -l 'app in (router,worker)' --all-containers --prefix --tail=60 || true
+          kubectl get events -n mini-router --field-selector type=Warning --sort-by=.metadata.creationTimestamp || true
+      - if: always() && steps.kind.outcome == 'success'
         run: tests/kind/teardown.sh
