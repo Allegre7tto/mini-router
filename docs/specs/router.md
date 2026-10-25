@@ -343,12 +343,12 @@ kind 测试使用真实 kubelet，不用只伪造 Node 或 Pod 对象的模拟�
 ## 11. 模块边界
 
 ```text
-src/epp/        ext-proc、candidate 解析、选路响应
-src/renderer/   Renderer client
-src/workers/    进程内 endpoint 状态和后台任务
-src/kv/         event、replay、prefix index
-src/routing/    load、评分和选路
-src/adapter/    vLLM token-in 字段和响应转发
+crates/router/src/epp/        ext-proc、candidate 解析、选路响应
+crates/router/src/renderer/   Renderer client
+crates/router/src/workers/    进程内 endpoint 状态和后台任务
+crates/router/src/kv/         event、replay、prefix index
+crates/router/src/routing/    load、评分和选路
+crates/router/src/adapter/    vLLM token-in 字段和响应转发
 ```
 
 - `epp` 不实现 Gateway。

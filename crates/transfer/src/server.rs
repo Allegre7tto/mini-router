@@ -45,6 +45,7 @@ async fn handle(engine: Engine, mut stream: TcpStream) -> Result<(), Error> {
     .await
     .map_err(|_| Error::Disconnected)??;
     if !protocol::authenticated(&handshake, &engine.inner.config.token) {
+        protocol::send(&mut stream, &[0]).await?;
         return Err(Error::Auth);
     }
     protocol::send(&mut stream, &[1]).await?;
